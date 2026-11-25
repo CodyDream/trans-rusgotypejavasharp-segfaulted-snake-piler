@@ -448,6 +448,13 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
   const argTys = e.args.map(a => exprTy(a, ctx));
   if (ot == null) return null;
 
+  // canonicalize the neutral member name the TS backend emits for both
+  // list.index and string.find — IR always carries the canonical name
+  if (e.name === 'indexOf') {
+    if (ot.k === 'list') e.name = 'index';
+    else if (ot.k === 'string') e.name = 'find';
+  }
+
   if (ot.k === 'list') {
     switch (e.name) {
       case 'append': case 'push':
