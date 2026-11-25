@@ -15,13 +15,14 @@ the terminal link: it translates, but the chain does not point back past it.
 
 Built: the IR spine + pretty-printer, the fixpoint type inferencer, the
 Python frontend (real `ast`), the TypeScript frontend (parses the v1 TS
-dialect — the exact shape the TS backend emits), the **TypeScript backend**
-and the **Java backend** (both execution-verified), and the CLI
+dialect — the exact shape the TS backend emits), the **TypeScript**,
+**Java** and **C#** backends (all three execution-verified), and the CLI
 (`langs / status / dump / infer / norm / trans`).
 
 `trans` works for any built frontend/backend pair — `py->ts`, `py->java`,
-even `ts->ts` — because everything funnels through the same IR. The canonical
-12 chain edges are adjacent pairs; a non-adjacent `trans` prints a note.
+`py->cs`, even `ts->ts` — because everything funnels through the same IR.
+The canonical 12 chain edges are adjacent pairs; a non-adjacent `trans`
+prints a note.
 
 Not built yet (the rest of this README describes the v1 target): the other
 five backends, the chain driver, the non-destructive writer, full chain
@@ -56,11 +57,12 @@ npm install                 # typescript for typechecking only
 node src/cli.ts langs       # print the chain
 node src/cli.ts infer program.py    # parse + infer, print the typed IR (py, ts)
 node src/cli.ts norm program.py     # normalized IR — diff two frontends' view
-node tests/run.ts           # gold suite (31 checks in v0.1)
+node tests/run.ts           # gold suite (32 checks in v0.1)
 
 # transpile — works today (output to stdout):
 node src/cli.ts trans 'py->ts'   program.py    # run with: node out.ts
 node src/cli.ts trans 'py->java' program.py    # run with: java Program.java (JDK 11+)
+node src/cli.ts trans 'py->cs'   program.py    # run with: dotnet run Program.cs (.NET 10+)
 node src/cli.ts trans 'ts->ts'   program.ts    # self-edge round-trip
 
 # walk the whole chain, one artifact per hop (needs the remaining backends)
@@ -105,14 +107,14 @@ branch-declared variables used after the branch.
 
 ## Validation
 
-`node tests/run.ts` — 31 gold checks (the v0.1 set):
+`node tests/run.ts` — 32 gold checks (the v0.1 set):
 
 - py and ts frontends parse + infer the smoke program
 - py and ts frontends agree byte-for-byte on normalized IR for the same program
 - **edge py->ts: the emitted TS re-parses to identical normalized IR**
 - **edge ts->ts: self-edge re-parse identity**
-- **execution: the chain demo's node and java outputs equal python3's output**
-  (python3 is the oracle)
+- **execution: the chain demo's node, java and dotnet outputs equal python3's
+  output** (python3 is the oracle)
 - dialect canonicalizations verified (`indexOf` → `index`/`find` by receiver
   type, `xs.join(sep)` → `sep.join(xs)`, `trim` → `strip`,
   `toUpperCase` → `upper`, `push` → `append`)
@@ -128,17 +130,23 @@ forward/backward chain executed — they land with the remaining backends.
 ## Documented divergences (the honest section)
 
 - `//` and `%` on negative numbers floor in Python but truncate in
-  C#/Go/Rust/C++ — the built backends (TypeScript, Java) match Python anyway
-  via their prelude helpers (`idiv`/`imod`, `Math.floorDiv`/`floorMod`); the
-  remaining backends must do the same when they land.
+  Go/Rust/C++ — the built backends (TypeScript, Java, C#) match Python anyway
+  via their prelude helpers (`idiv`/`imod`, `Math.floorDiv`/`floorMod`,
+  exact floor-division arithmetic); the remaining backends must do the same
+  when they land. `/` is always true division (C-family backends widen to
+  double, like Python).
 - Printing a whole map/dict may order differently per language (insertion
   order vs sorted). Scalar values are exact.
 - Whole-valued floats print `2.0` in Python, `2` in TS/JS (all other
   languages match Python).
 - C++ evaluates call arguments in unspecified order — the backend hoists
   side-effectful arguments into temporaries to force Python's order.
-- `int` is 64-bit everywhere — except the Java backend, which uses Java's
-  32-bit `int` (v0.1 limitation, called out in the backend header).
+- `int` is 64-bit everywhere — except the Java and C# backends, which use
+  their native 32-bit `int` (v0.1 limitation, called out in the backend
+  headers).
+- The C# backend does not rename shadowing locals (C# forbids redeclaring a
+  name used in an enclosing scope, CS0136) — such programs fail C#
+  compilation loudly rather than silently.
 
 ## Layout
 
@@ -146,7 +154,7 @@ forward/backward chain executed — they land with the remaining backends.
 src/ir/         typed AST spine + printer
 src/infer/      fixpoint type inferencer
 src/frontends/  py (via python3 ast), ts (v1 dialect) — cs java go rust cpp planned
-src/backends/   ts, java (+ preludes) — py cs go rust cpp planned
+src/backends/   ts, java, cs (+ preludes) — py go rust cpp planned
 src/chain/      the 6 bidirectional edges, chain walker
 src/cli.ts      ouro CLI
 tests/          gold suite + demo programs

@@ -18,6 +18,7 @@ import { parsePyFile } from './frontends/py/index.ts';
 import { parseTsFile } from './frontends/ts/index.ts';
 import { emitTs } from './backends/ts/index.ts';
 import { emitJava } from './backends/java/index.ts';
+import { emitCs } from './backends/cs/index.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
 import { TranspileError } from './ir/types.ts';
@@ -39,6 +40,7 @@ const FRONTENDS: Record<string, (path: string) => Module> = {
 const BACKENDS: Record<string, (m: Module) => string> = {
   ts: emitTs,
   java: emitJava,
+  cs: emitCs,
 };
 
 function langOf(path: string): string {

@@ -22,6 +22,7 @@ import { parsePyFile } from '../src/frontends/py/index.ts';
 import { parseTsFile } from '../src/frontends/ts/index.ts';
 import { emitTs } from '../src/backends/ts/index.ts';
 import { emitJava } from '../src/backends/java/index.ts';
+import { emitCs } from '../src/backends/cs/index.ts';
 import { inferModule } from '../src/infer/infer.ts';
 import { dumpNormalized } from '../src/ir/show.ts';
 import { TranspileError } from '../src/ir/types.ts';
@@ -190,8 +191,17 @@ check('non-destructive guarantee: parsing never modifies an input file', () => {
 const DEMO_CHAIN = join(import.meta.dirname!, '..', 'demo', 'hello_chain.py');
 const HAS_JAVA = spawnSync('java', ['--version'], { encoding: 'utf8' }).status === 0;
 
-function run(cmd: string, args: string[]): string {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+// dotnet may be on PATH or installed rootlessly at the workspace path
+function findDotnet(): string | null {
+  for (const cmd of ['dotnet', '/home/z/my-project/.dotnet/dotnet']) {
+    if (spawnSync(cmd, ['--version'], { encoding: 'utf8' }).status === 0) return cmd;
+  }
+  return null;
+}
+const DOTNET = findDotnet();
+
+function run(cmd: string, args: string[], env?: Record<string, string>): string {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', env: env ? { ...process.env, ...env } : undefined });
   if (r.status !== 0) throw new Error(`${cmd} failed: ${(r.stderr || r.stdout || '').slice(0, 400)}`);
   return r.stdout;
 }
@@ -234,6 +244,19 @@ if (HAS_JAVA) {
   });
 } else {
   console.log('skip  py->java executes (no JDK on PATH)');
+}
+
+if (DOTNET) {
+  check('edge py->cs executes: dotnet output equals python3 output (chain demo)', () => {
+    const expected = run('python3', [DEMO_CHAIN]);
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-exec-'));
+    const csPath = join(dir, 'HelloChain.cs');
+    writeFileSync(csPath, emitCs(inferModule(parsePyFile(DEMO_CHAIN))));
+    const actual = run(DOTNET, ['run', csPath], DOTNET.startsWith('/') ? { DOTNET_ROOT: '/home/z/my-project/.dotnet' } : undefined);
+    if (actual !== expected) throw new Error(`dotnet:\n${actual}\npython:\n${expected}`);
+  });
+} else {
+  console.log('skip  py->cs executes (no .NET SDK available)');
 }
 
 // -- loud failures ------------------------------------------------------------
