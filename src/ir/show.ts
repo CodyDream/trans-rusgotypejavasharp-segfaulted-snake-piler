@@ -204,3 +204,23 @@ export function dumpModule(m: Module): string {
   for (const item of m.items) dumpItem(item, out);
   return out.join('');
 }
+
+/**
+ * Language-independent normalization for cross-hop comparison: the item order
+ * is a source-order artifact (C#/Java force classes and functions into
+ * different syntactic zones), so item order is sorted before dumping.
+ */
+export function dumpNormalized(m: Module): string {
+  const sorted: Module = {
+    ...m,
+    items: [...m.items].sort((a, b) => {
+      const ka = 'fields' in a ? 0 : 1;
+      const kb = 'fields' in b ? 0 : 1;
+      if (ka !== kb) return ka - kb;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    }),
+  };
+  const out: string[] = ['module X (from X):\n'];
+  for (const item of sorted.items) dumpItem(item, out);
+  return out.join('');
+}
