@@ -20,6 +20,8 @@ import { join } from 'node:path';
 
 import { parsePyFile } from '../src/frontends/py/index.ts';
 import { parseTsFile } from '../src/frontends/ts/index.ts';
+import { emitTs } from '../src/backends/ts/index.ts';
+import { emitJava } from '../src/backends/java/index.ts';
 import { inferModule } from '../src/infer/infer.ts';
 import { dumpNormalized } from '../src/ir/show.ts';
 import { TranspileError } from '../src/ir/types.ts';
@@ -182,6 +184,57 @@ check('non-destructive guarantee: parsing never modifies an input file', () => {
     if (!before.equals(after)) throw new Error(`${path} changed on disk`);
   }
 });
+
+// -- transpile edges (Layer 3) -------------------------------------------------
+
+const DEMO_CHAIN = join(import.meta.dirname!, '..', 'demo', 'hello_chain.py');
+const HAS_JAVA = spawnSync('java', ['--version'], { encoding: 'utf8' }).status === 0;
+
+function run(cmd: string, args: string[]): string {
+  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`${cmd} failed: ${(r.stderr || r.stdout || '').slice(0, 400)}`);
+  return r.stdout;
+}
+
+check('edge py->ts: emitted TS re-parses to identical normalized IR', () => {
+  const m = inferModule(parsePyFile(DEMO_CHAIN));
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-edge-'));
+  const tsPath = join(dir, 'hello_chain.ts');
+  writeFileSync(tsPath, emitTs(m));
+  const pyNorm = dumpNormalized(m);
+  const tsNorm = parseTyped('ts', tsPath);
+  if (pyNorm !== tsNorm) throw new Error(firstDiff(pyNorm, tsNorm));
+});
+
+check('edge ts->ts: self-edge re-parse identity', () => {
+  const m = parseTsFile(SMOKE_TS);
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-edge-'));
+  const tsPath = join(dir, 'smoke_self.ts');
+  writeFileSync(tsPath, emitTs(m));
+  if (parseTyped('ts', tsPath) !== dumpNormalized(m)) throw new Error('self-edge IR diverged');
+});
+
+check('edge py->ts executes: node output equals python3 output (chain demo)', () => {
+  const expected = run('python3', [DEMO_CHAIN]);
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-exec-'));
+  const tsPath = join(dir, 'hello_chain.ts');
+  writeFileSync(tsPath, emitTs(inferModule(parsePyFile(DEMO_CHAIN))));
+  const actual = run(process.execPath, [tsPath]);
+  if (actual !== expected) throw new Error(`node:\n${actual}\npython:\n${expected}`);
+});
+
+if (HAS_JAVA) {
+  check('edge py->java executes: java output equals python3 output (chain demo)', () => {
+    const expected = run('python3', [DEMO_CHAIN]);
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-exec-'));
+    const javaPath = join(dir, 'HelloChain.java');
+    writeFileSync(javaPath, emitJava(inferModule(parsePyFile(DEMO_CHAIN))));
+    const actual = run('java', [javaPath]);
+    if (actual !== expected) throw new Error(`java:\n${actual}\npython:\n${expected}`);
+  });
+} else {
+  console.log('skip  py->java executes (no JDK on PATH)');
+}
 
 // -- loud failures ------------------------------------------------------------
 

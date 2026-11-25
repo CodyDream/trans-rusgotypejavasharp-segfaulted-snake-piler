@@ -17,6 +17,7 @@
 import { parsePyFile } from './frontends/py/index.ts';
 import { parseTsFile } from './frontends/ts/index.ts';
 import { emitTs } from './backends/ts/index.ts';
+import { emitJava } from './backends/java/index.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
 import { TranspileError } from './ir/types.ts';
@@ -37,6 +38,7 @@ const FRONTENDS: Record<string, (path: string) => Module> = {
 /** Layer 3 registry: language -> code emitter. */
 const BACKENDS: Record<string, (m: Module) => string> = {
   ts: emitTs,
+  java: emitJava,
 };
 
 function langOf(path: string): string {
@@ -80,11 +82,8 @@ function parseEdge(spec: string): { src: string; dst: string } {
   }
   const si = (CHAIN as readonly string[]).indexOf(src);
   const di = (CHAIN as readonly string[]).indexOf(dst);
-  if (Math.abs(si - di) !== 1) {
-    throw new TranspileError(
-      `'${src}->${dst}' is not a chain edge — edges connect adjacent languages only (12 directed edges total)`,
-      'cli',
-    );
+  if (Math.abs(si - di) > 1) {
+    console.error(`ouro: note: '${src}->${dst}' skips chain hops — the canonical 12 edges are adjacent pairs, but any built frontend/backend pair funnels through the same IR`);
   }
   return { src, dst };
 }

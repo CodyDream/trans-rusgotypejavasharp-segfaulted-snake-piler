@@ -15,11 +15,17 @@ the terminal link: it translates, but the chain does not point back past it.
 
 Built: the IR spine + pretty-printer, the fixpoint type inferencer, the
 Python frontend (real `ast`), the TypeScript frontend (parses the v1 TS
-dialect — the exact shape the TS backend will emit), and the CLI
+dialect — the exact shape the TS backend emits), the **TypeScript backend**
+and the **Java backend** (both execution-verified), and the CLI
 (`langs / status / dump / infer / norm / trans`).
 
-Not built yet (the rest of this README describes the v1 target): backends,
-the chain driver, the non-destructive writer, execution gold checks.
+`trans` works for any built frontend/backend pair — `py->ts`, `py->java`,
+even `ts->ts` — because everything funnels through the same IR. The canonical
+12 chain edges are adjacent pairs; a non-adjacent `trans` prints a note.
+
+Not built yet (the rest of this README describes the v1 target): the other
+five backends, the chain driver, the non-destructive writer, full chain
+execution.
 
 ## The trick
 
@@ -50,12 +56,14 @@ npm install                 # typescript for typechecking only
 node src/cli.ts langs       # print the chain
 node src/cli.ts infer program.py    # parse + infer, print the typed IR (py, ts)
 node src/cli.ts norm program.py     # normalized IR — diff two frontends' view
-node tests/run.ts           # gold suite (27 checks in v0.1)
+node tests/run.ts           # gold suite (31 checks in v0.1)
 
-# single edge (12 available) — needs the target backend (not built yet)
-node src/cli.ts trans 'py->ts'   program.py
+# transpile — works today (output to stdout):
+node src/cli.ts trans 'py->ts'   program.py    # run with: node out.ts
+node src/cli.ts trans 'py->java' program.py    # run with: java Program.java (JDK 11+)
+node src/cli.ts trans 'ts->ts'   program.ts    # self-edge round-trip
 
-# walk the whole chain, one artifact per hop (needs backends)
+# walk the whole chain, one artifact per hop (needs the remaining backends)
 node src/cli.ts chain program.py            # py -> ... -> cpp
 node src/cli.ts chain main.rs --to py       # rust -> ... -> py
 
@@ -97,10 +105,14 @@ branch-declared variables used after the branch.
 
 ## Validation
 
-`node tests/run.ts` — 27 gold checks (the v0.1 set):
+`node tests/run.ts` — 31 gold checks (the v0.1 set):
 
 - py and ts frontends parse + infer the smoke program
 - py and ts frontends agree byte-for-byte on normalized IR for the same program
+- **edge py->ts: the emitted TS re-parses to identical normalized IR**
+- **edge ts->ts: self-edge re-parse identity**
+- **execution: the chain demo's node and java outputs equal python3's output**
+  (python3 is the oracle)
 - dialect canonicalizations verified (`indexOf` → `index`/`find` by receiver
   type, `xs.join(sep)` → `sep.join(xs)`, `trim` → `strip`,
   `toUpperCase` → `upper`, `push` → `append`)
@@ -110,21 +122,23 @@ branch-declared variables used after the branch.
 - 18 unsupported-construct cases fail loudly (`TranspileError` with a line
   number at the parse layer; never silently)
 
-The execution/round-trip gold checks (all 12 edges re-parse to identical IR,
-forward-chain hops executed with node / `java` / g++, backward chain returning
-to Python) land together with the backends — they are the v1 target.
+Remaining for v1: all 12 edges re-parsing to identical IR and the full
+forward/backward chain executed — they land with the remaining backends.
 
 ## Documented divergences (the honest section)
 
 - `//` and `%` on negative numbers floor in Python but truncate in
-  C#/Java/Go/Rust/C++ (TypeScript matches Python via `Math.floor`).
+  C#/Go/Rust/C++ — the built backends (TypeScript, Java) match Python anyway
+  via their prelude helpers (`idiv`/`imod`, `Math.floorDiv`/`floorMod`); the
+  remaining backends must do the same when they land.
 - Printing a whole map/dict may order differently per language (insertion
   order vs sorted). Scalar values are exact.
 - Whole-valued floats print `2.0` in Python, `2` in TS/JS (all other
   languages match Python).
 - C++ evaluates call arguments in unspecified order — the backend hoists
   side-effectful arguments into temporaries to force Python's order.
-- `int` is 64-bit everywhere; Python's unbounded ints are not modeled.
+- `int` is 64-bit everywhere — except the Java backend, which uses Java's
+  32-bit `int` (v0.1 limitation, called out in the backend header).
 
 ## Layout
 
@@ -132,7 +146,7 @@ to Python) land together with the backends — they are the v1 target.
 src/ir/         typed AST spine + printer
 src/infer/      fixpoint type inferencer
 src/frontends/  py (via python3 ast), ts (v1 dialect) — cs java go rust cpp planned
-src/backends/   py ts cs java go rust cpp (+ dialect preludes) — planned
+src/backends/   ts, java (+ preludes) — py cs go rust cpp planned
 src/chain/      the 6 bidirectional edges, chain walker
 src/cli.ts      ouro CLI
 tests/          gold suite + demo programs
