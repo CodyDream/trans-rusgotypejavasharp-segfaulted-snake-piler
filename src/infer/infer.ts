@@ -167,7 +167,7 @@ function walkStmt(s: Stmt, ctx: Ctx): void {
         }
       } else if (s.target.k === 'index') {
         const ot = exprTy(s.target.obj, ctx);
-        exprTy(s.target.idx, ctx);
+        exprTy(s.target, ctx);   // stamps objTy on the index node (backend dispatch)
         exprTy(s.value, ctx);
         if (ot != null && vt != null) {
           if (ot.k === 'list' && !compat(ot.elem, vt)) {

@@ -16,6 +16,7 @@
 
 import { parsePyFile } from './frontends/py/index.ts';
 import { parseTsFile } from './frontends/ts/index.ts';
+import { emitTs } from './backends/ts/index.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
 import { TranspileError } from './ir/types.ts';
@@ -33,8 +34,10 @@ const FRONTENDS: Record<string, (path: string) => Module> = {
   ts: parseTsFile,
 };
 
-/** Layer 3 registry: language -> IR printer. Empty in v0.1. */
-const BACKENDS: Record<string, (m: Module) => string> = {};
+/** Layer 3 registry: language -> code emitter. */
+const BACKENDS: Record<string, (m: Module) => string> = {
+  ts: emitTs,
+};
 
 function langOf(path: string): string {
   for (const [lang, ext] of Object.entries(EXT)) {

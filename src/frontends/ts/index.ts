@@ -318,6 +318,10 @@ class Parser {
     }
     this.expect(';');
     if (e.k === 'call' && e.name === 'print') return sPrint(e.args);
+    if (e.k === 'call' && e.name === 'mapSet') {
+      if (e.args.length !== 3) this.err('mapSet(d, k, v) takes exactly 3 arguments', t);
+      return sAssign(eIndex(e.args[0], e.args[1]), e.args[2]);
+    }
     return sExpr(e);
   }
 
@@ -583,7 +587,14 @@ class Parser {
       }
       this.err('only Array.from(d.keys()) / Array.from(d.values()) are part of the dialect', tok);
     }
-    return eMethod(obj, METHOD_CANON[name] ?? name, args);
+    const canon = METHOD_CANON[name] ?? name;
+    // IR carries plain `sort`; the comparator (backends re-add it per language)
+    // is accepted and dropped here so re-parsed IR matches the original
+    if (canon === 'sort') {
+      if (args.length > 1) this.err('.sort() takes at most one comparator argument', tok);
+      return eMethod(obj, 'sort', []);
+    }
+    return eMethod(obj, canon, args);
   }
 
   /** Free call: prelude helpers + IR built-ins + user functions. */
@@ -603,6 +614,15 @@ class Parser {
       case 'mapPop':
         if (args.length !== 2) this.err('mapPop(d, k) takes exactly 2 arguments', tok);
         return eMethod(args[0], 'pop', [args[1]]);
+      case 'mapGet':
+        if (args.length !== 3) this.err('mapGet(d, k, default) takes exactly 3 arguments', tok);
+        return eMethod(args[0], 'get', [args[1], args[2]]);
+      case 'mapIndex':
+        if (args.length !== 2) this.err('mapIndex(d, k) takes exactly 2 arguments', tok);
+        return eIndex(args[0], args[1]);
+      case 'listClear':
+        if (args.length !== 1) this.err('listClear(xs) takes exactly 1 argument', tok);
+        return eMethod(args[0], 'clear', []);
       case 'len': case 'str': case 'int': case 'float': case 'print':
         return eCall(name, args);
       default:
@@ -734,7 +754,7 @@ export function parseTsFile(filePath: string): Module {
     items.push({ name: 'main', params: [], ret: TY_VOID, body: mainBody });
   }
   const name = basename(filePath).replace(/\.[^.]+$/, '');
-  const m: Module = { name, sourceLang: 'ts', items };
+  const m: Module = { name, sourceLang: 'ts', items, implicitMain: mainBody.length > 0 };
   inferModule(m);   // fill remaining nulls (literal lets, foreach) + validate
   return m;
 }
