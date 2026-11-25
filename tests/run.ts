@@ -23,6 +23,9 @@ import { parseTsFile } from '../src/frontends/ts/index.ts';
 import { emitTs } from '../src/backends/ts/index.ts';
 import { emitJava } from '../src/backends/java/index.ts';
 import { emitCs } from '../src/backends/cs/index.ts';
+import { emitRs } from '../src/backends/rs/index.ts';
+import { linkModules } from '../src/link.ts';
+import type { Module } from '../src/ir/types.ts';
 import { inferModule } from '../src/infer/infer.ts';
 import { dumpNormalized } from '../src/ir/show.ts';
 import { TranspileError } from '../src/ir/types.ts';
@@ -258,6 +261,106 @@ if (DOTNET) {
 } else {
   console.log('skip  py->cs executes (no .NET SDK available)');
 }
+
+// rustc may be on PATH or installed rootlessly at the workspace path (the
+// .cargo/bin binary is a rustup proxy and needs RUSTUP_HOME)
+function findRustc(): string | null {
+  for (const cmd of ['rustc', '/home/z/my-project/.cargo/bin/rustc']) {
+    if (spawnSync(cmd, ['--version'], { encoding: 'utf8', env: { ...process.env, RUSTUP_HOME: '/home/z/my-project/.rustup' } }).status === 0) return cmd;
+  }
+  return null;
+}
+const RUSTC = findRustc();
+const RUST_ENV = { RUSTUP_HOME: '/home/z/my-project/.rustup' };
+
+if (RUSTC) {
+  check('edge py->rust executes: rustc output equals python3 output (chain demo)', () => {
+    const expected = run('python3', [DEMO_CHAIN]);
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-exec-'));
+    const rsPath = join(dir, 'hello_chain.rs');
+    writeFileSync(rsPath, emitRs(inferModule(parsePyFile(DEMO_CHAIN))));
+    const prog = join(dir, 'chain_rs');
+    const c = spawnSync(RUSTC, ['-O', rsPath, '-o', prog], { encoding: 'utf8', env: { ...process.env, ...RUST_ENV } });
+    if (c.status !== 0) throw new Error(`rustc failed: ${(c.stderr || '').slice(0, 400)}`);
+    const actual = run(prog, []);
+    if (actual !== expected) throw new Error(`rust:\n${actual}\npython:\n${expected}`);
+  });
+} else {
+  console.log('skip  py->rust executes (no rustc available)');
+}
+
+// -- the linker: multi-language modules merged through the IR spine -----------
+
+const STRESS_LIB = join(import.meta.dirname!, '..', 'demo', 'stress_lib.py');
+const STRESS_MAIN = join(import.meta.dirname!, '..', 'demo', 'stress_main.ts');
+const STRESS_ALL = join(import.meta.dirname!, '..', 'demo', 'stress_all.py');
+
+function linkStress(): Module {
+  const merged = linkModules(parseTsFile(STRESS_MAIN), [parsePyFile(STRESS_LIB)]);
+  return inferModule(merged);
+}
+
+check('link: merged multi-language module emits TS that re-parses to identical IR', () => {
+  const merged = linkStress();
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-link-'));
+  const tsPath = join(dir, 'stress.ts');
+  writeFileSync(tsPath, emitTs(merged));
+  const reparsed = inferModule(parseTsFile(tsPath));
+  if (dumpNormalized(reparsed) !== dumpNormalized(merged)) {
+    throw new Error('link up-down identity diverged');
+  }
+});
+
+const STRESS_ORACLE = (): string => run('python3', [STRESS_ALL]);
+
+if (RUSTC) {
+  check('link: py lib + ts entry linked -> rust binary equals python3 oracle', () => {
+    const expected = STRESS_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-linkexec-'));
+    const rsPath = join(dir, 'stress.rs');
+    writeFileSync(rsPath, emitRs(linkStress()));
+    const prog = join(dir, 'stress_rs');
+    const c = spawnSync(RUSTC, ['-O', rsPath, '-o', prog], { encoding: 'utf8', env: { ...process.env, ...RUST_ENV } });
+    if (c.status !== 0) throw new Error(`rustc failed: ${(c.stderr || '').slice(0, 400)}`);
+    if (run(prog, []) !== expected) throw new Error('rust linked output diverged from python3');
+  });
+} else {
+  console.log('skip  link->rust executes (no rustc available)');
+}
+
+if (HAS_JAVA) {
+  check('link: py lib + ts entry linked -> java equals python3 oracle', () => {
+    const expected = STRESS_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-linkexec-'));
+    const javaPath = join(dir, 'stress_main.java');
+    writeFileSync(javaPath, emitJava(linkStress()));
+    if (run('java', [javaPath]) !== expected) throw new Error('java linked output diverged from python3');
+  });
+} else {
+  console.log('skip  link->java executes (no JDK)');
+}
+
+if (DOTNET) {
+  check('link: py lib + ts entry linked -> dotnet equals python3 oracle', () => {
+    const expected = STRESS_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-linkexec-'));
+    const csPath = join(dir, 'stress.cs');
+    writeFileSync(csPath, emitCs(linkStress()));
+    const actual = run(DOTNET, ['run', csPath], DOTNET.startsWith('/') ? { DOTNET_ROOT: '/home/z/my-project/.dotnet' } : undefined);
+    if (actual !== expected) throw new Error('cs linked output diverged from python3');
+  });
+} else {
+  console.log('skip  link->cs executes (no .NET SDK)');
+}
+
+check('link: py lib + ts entry linked -> node equals python3 oracle', () => {
+  const expected = STRESS_ORACLE();
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-linkexec-'));
+  const tsPath = join(dir, 'stress.ts');
+  writeFileSync(tsPath, emitTs(linkStress()));
+  if (run(process.execPath, [tsPath]) !== expected) throw new Error('ts linked output diverged from python3');
+});
+
 
 // -- loud failures ------------------------------------------------------------
 
