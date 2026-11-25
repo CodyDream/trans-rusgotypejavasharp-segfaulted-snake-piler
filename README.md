@@ -33,6 +33,20 @@ no C ABI. The stress program (`demo/stress_lib.py` + `demo/stress_main.ts`)
 runs byte-identically in rust, java, cs and ts against the `stress_all.py`
 python3 oracle.
 
+The same pipeline ports real libraries end to end: **`demo/graphlib.py`** — a
+Python-authored pathfinding library (a `Graph` class with adjacency +
+flat-keyed weights, BFS shortest-hop paths, Dijkstra min-weight paths with
+linear-scan frontier, `has_path`, `order`, `describe`) driven by a
+TypeScript entry (`demo/graphlib_driver.ts`). The linked program runs
+byte-identically in rust, java, cs and ts against the `graphlib_all.py`
+oracle, and the library alone transpiles to a compilable, silent module in
+all four backends (a library has no entry point). Porting it surfaced and
+fixed three real backend gaps: C# now auto-escapes its reserved words with
+verbatim identifiers (`out` → `@out`) instead of failing, empty `[]`/`{}`
+literals in call arguments and returns now take the contextual element type
+(C# has no target typing to fall back on), and method-call argument types
+are filled from the container's declared value type.
+
 Not built yet (the rest of this README describes the v1 target): the py/go/
 cpp backends, the chain driver, the non-destructive writer, full chain
 execution.
@@ -66,7 +80,7 @@ npm install                 # typescript for typechecking only
 node src/cli.ts langs       # print the chain
 node src/cli.ts infer program.py    # parse + infer, print the typed IR (py, ts)
 node src/cli.ts norm program.py     # normalized IR — diff two frontends' view
-node tests/run.ts           # gold suite (38 checks in v0.1)
+node tests/run.ts           # gold suite (43 checks in v0.1)
 
 # transpile — works today (output to stdout):
 node src/cli.ts trans 'py->ts'   program.py    # run with: node out.ts
@@ -121,7 +135,7 @@ branch-declared variables used after the branch.
 
 ## Validation
 
-`node tests/run.ts` — 38 gold checks (the v0.1 set):
+`node tests/run.ts` — 43 gold checks (the v0.1 set):
 
 - py and ts frontends parse + infer the smoke program
 - py and ts frontends agree byte-for-byte on normalized IR for the same program
@@ -133,6 +147,10 @@ branch-declared variables used after the branch.
   merged module emits TS that re-parses to identical IR (up-down identity),
   and the linked program's rust, java, dotnet and node outputs all equal the
   `stress_all.py` python3 oracle**
+- **port: the graphlib pathfinding library (`graphlib.py` authored in Python,
+  driven by `graphlib_driver.ts`) — the library alone compiles to a silent
+  rust binary, and the linked program's rust, java, dotnet and node outputs
+  all equal the `graphlib_all.py` python3 oracle**
 - dialect canonicalizations verified (`indexOf` → `index`/`find` by receiver
   type, `xs.join(sep)` → `sep.join(xs)`, `trim` → `strip`,
   `toUpperCase` → `upper`, `push` → `append`)

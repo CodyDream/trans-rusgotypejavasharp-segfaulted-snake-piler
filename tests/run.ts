@@ -361,6 +361,81 @@ check('link: py lib + ts entry linked -> node equals python3 oracle', () => {
   if (run(process.execPath, [tsPath]) !== expected) throw new Error('ts linked output diverged from python3');
 });
 
+// -- the port: a real library (graphlib — BFS + Dijkstra) through the pipeline -
+// The library is authored in PYTHON, its driver in TYPESCRIPT; the merged
+// program must match the single-file python3 oracle in every backend, and the
+// library alone must transpile to a compilable (silent) module.
+
+const GRAPHLIB_LIB = join(import.meta.dirname!, '..', 'demo', 'graphlib.py');
+const GRAPHLIB_MAIN = join(import.meta.dirname!, '..', 'demo', 'graphlib_driver.ts');
+const GRAPHLIB_ALL = join(import.meta.dirname!, '..', 'demo', 'graphlib_all.py');
+
+function linkGraphlib(): Module {
+  const merged = linkModules(parseTsFile(GRAPHLIB_MAIN), [parsePyFile(GRAPHLIB_LIB)]);
+  return inferModule(merged);
+}
+
+const GRAPHLIB_ORACLE = (): string => run('python3', [GRAPHLIB_ALL]);
+
+if (RUSTC) {
+  check('port: graphlib library-only py->rust compiles and runs silent (library shape)', () => {
+    const expected = run('python3', [GRAPHLIB_LIB]);   // a library produces no output
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const rsPath = join(dir, 'graphlib.rs');
+    writeFileSync(rsPath, emitRs(inferModule(parsePyFile(GRAPHLIB_LIB))));
+    const prog = join(dir, 'graphlib_rs');
+    const c = spawnSync(RUSTC, ['-O', rsPath, '-o', prog], { encoding: 'utf8', env: { ...process.env, ...RUST_ENV } });
+    if (c.status !== 0) throw new Error(`rustc failed: ${(c.stderr || '').slice(0, 400)}`);
+    if (run(prog, []) !== expected) throw new Error('rust library output diverged (expected silent)');
+  });
+
+  check('port: graphlib py lib + ts entry linked -> rust equals python3 oracle', () => {
+    const expected = GRAPHLIB_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const rsPath = join(dir, 'graph_port.rs');
+    writeFileSync(rsPath, emitRs(linkGraphlib()));
+    const prog = join(dir, 'graph_port_rs');
+    const c = spawnSync(RUSTC, ['-O', rsPath, '-o', prog], { encoding: 'utf8', env: { ...process.env, ...RUST_ENV } });
+    if (c.status !== 0) throw new Error(`rustc failed: ${(c.stderr || '').slice(0, 400)}`);
+    if (run(prog, []) !== expected) throw new Error('rust ported output diverged from python3');
+  });
+} else {
+  console.log('skip  port graphlib -> rust (no rustc available)');
+}
+
+if (HAS_JAVA) {
+  check('port: graphlib py lib + ts entry linked -> java equals python3 oracle', () => {
+    const expected = GRAPHLIB_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const javaPath = join(dir, 'graphlib_driver.java');
+    writeFileSync(javaPath, emitJava(linkGraphlib()));
+    if (run('java', [javaPath]) !== expected) throw new Error('java ported output diverged from python3');
+  });
+} else {
+  console.log('skip  port graphlib -> java (no JDK)');
+}
+
+if (DOTNET) {
+  check('port: graphlib py lib + ts entry linked -> dotnet equals python3 oracle', () => {
+    const expected = GRAPHLIB_ORACLE();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const csPath = join(dir, 'graph_port.cs');
+    writeFileSync(csPath, emitCs(linkGraphlib()));
+    const actual = run(DOTNET, ['run', csPath], DOTNET.startsWith('/') ? { DOTNET_ROOT: '/home/z/my-project/.dotnet' } : undefined);
+    if (actual !== expected) throw new Error('cs ported output diverged from python3');
+  });
+} else {
+  console.log('skip  port graphlib -> cs (no .NET SDK)');
+}
+
+check('port: graphlib py lib + ts entry linked -> node equals python3 oracle', () => {
+  const expected = GRAPHLIB_ORACLE();
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+  const tsPath = join(dir, 'graph_port.ts');
+  writeFileSync(tsPath, emitTs(linkGraphlib()));
+  if (run(process.execPath, [tsPath]) !== expected) throw new Error('ts ported output diverged from python3');
+});
+
 
 // -- loud failures ------------------------------------------------------------
 
