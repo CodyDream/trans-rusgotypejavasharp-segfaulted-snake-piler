@@ -138,6 +138,12 @@ class Parser {
     const mainBody: Stmt[] = [];
     while (!this.at('<eof>')) {
       const t = this.peek();
+      if (t.v === 'int' && t.t === 'ident' && this.peek(1).v === 'main' && this.peek(2).t === '(') {
+        // C++ requires the entry to spell `int main()` — IR's entry is void
+        this.next();   // consume the spelled 'int'
+        items.push(this.parseDeclOrFun(TY_VOID));
+        continue;
+      }
       if (this.atTypeStart()) { items.push(this.parseDeclOrFun()); continue; }
       if (t.t === 'class') { items.push(this.parseClass()); continue; }
       if (t.t === 'template' || t.t === 'namespace' || t.t === 'using' || t.t === 'typedef') {
@@ -148,20 +154,24 @@ class Parser {
     return { items, mainBody };
   }
 
-  /** A declaration or function definition starts with a type. */
+  /**
+   * A declaration or function definition starts with a type. C++'s own rule:
+   * `ident ident` can only be a declaration (`Matrix m`, `long x`), never an
+   * expression — `foo(1)` / `x = 5` / `a.set(...)` don't match. Generics
+   * (`vector<T>`, `PyDict<V>`) are reserved, so ident + '<' is always one.
+   */
   private atTypeStart(): boolean {
     const t = this.peek();
     if (t.t !== 'ident') return false;
-    if (GENERIC_TYPE_WORDS.has(t.v)) return true;
-    if (PLAIN_TYPE_WORDS.has(t.v) || this.classNames.has(t.v)) return this.peek(1).t === 'ident';
-    return false;
+    if (this.peek(1).t === 'ident') return true;
+    return this.peek(1).t === '<' && GENERIC_TYPE_WORDS.has(t.v);
   }
 
   // -- declarations ---------------------------------------------------------
 
   /** `T name(params) { ... }` (function) — reached only via atTypeStart. */
-  private parseDeclOrFun(): FunDecl {
-    const ret = this.parseTy();
+  private parseDeclOrFun(preRet?: Ty, skipRetTok = false): FunDecl {
+    const ret = preRet ?? this.parseTy();
     const nameTok = this.expect('ident', 'for the function name');
     if (this.classNames.has(nameTok.v)) {
       this.err(`'${nameTok.v}' names both a class and a function (C++ rejects it too)`, nameTok);
@@ -230,7 +240,7 @@ class Parser {
         ctor = { params, body };
         continue;
       }
-      if (t.t !== 'ident' || !(GENERIC_TYPE_WORDS.has(t.v) || PLAIN_TYPE_WORDS.has(t.v))) {
+      if (t.t !== 'ident' || !(GENERIC_TYPE_WORDS.has(t.v) || PLAIN_TYPE_WORDS.has(t.v) || this.classNames.has(t.v))) {
         this.err(`expected a member declaration in class '${nameTok.v}' (fields spell 'long x;', methods 'long f() { ... }')`, t);
       }
       const mty = this.parseTy();

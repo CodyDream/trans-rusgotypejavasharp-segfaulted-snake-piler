@@ -75,6 +75,9 @@ inline string pyfloat_str(double d) {
 }
 
 // ---- pyrepr (quotes strings) / pystr (plain) ------------------------------
+// const char* overloads are REQUIRED: without them a string literal binds to
+// pyrepr(bool) (pointer->bool beats the user-defined string conversion).
+inline string pyrepr(const char* s) { return "'" + string(s) + "'"; }
 inline string pyrepr(const string& s) { return "'" + s + "'"; }
 inline string pyrepr(bool b) { return b ? "True" : "False"; }
 inline string pyrepr(long v) { return std::to_string(v); }
@@ -100,6 +103,7 @@ string pyrepr(const PyDict<V>& d) {
     return out + "}";
 }
 
+inline string pystr(const char* s) { return string(s); }
 inline string pystr(const string& s) { return s; }
 template<class T> string pystr(const T& x) { return pyrepr(x); }
 
@@ -212,7 +216,7 @@ template<class T> T pypop(vector<T>& xs) {
     xs.pop_back();
     return v;
 }
-template<class T> long pylist_index(const vector<T>& xs, const T& v) {
+template<class T, class U> long pylist_index(const vector<T>& xs, const U& v) {
     for (size_t i = 0; i < xs.size(); i++) if (xs[i] == v) return static_cast<long>(i);
     return -1;
 }

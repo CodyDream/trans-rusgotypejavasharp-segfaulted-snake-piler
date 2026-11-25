@@ -41,7 +41,7 @@ vector<long> evens(vector<long> xs) {
     return out;
 }
 
-void main() {
+int main() {
     Counter c = Counter("demo");
     print(c.bump(5), c.total, c.label);
     print(sum_to(10));

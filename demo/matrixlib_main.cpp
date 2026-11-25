@@ -1,6 +1,6 @@
 // matrixlib driver (v1 C++ dialect) — exercises the library API.
 
-void main() {
+int main() {
     Matrix a = Matrix(2, 3);
     a.set(0, 0, 1);
     a.set(0, 1, 2);
