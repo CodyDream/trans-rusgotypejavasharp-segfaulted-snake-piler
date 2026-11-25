@@ -15,6 +15,7 @@
  */
 
 import { parsePyFile } from './frontends/py/index.ts';
+import { parseTsFile } from './frontends/ts/index.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
 import { TranspileError } from './ir/types.ts';
@@ -29,7 +30,7 @@ export const EXT: Record<string, string> = {
 /** Layer 1 registry: language -> parser. Grows one entry per new frontend. */
 const FRONTENDS: Record<string, (path: string) => Module> = {
   py: parsePyFile,
-  // ts: parseTsFile,   // next hop — see src/frontends/ts/
+  ts: parseTsFile,
 };
 
 /** Layer 3 registry: language -> IR printer. Empty in v0.1. */
