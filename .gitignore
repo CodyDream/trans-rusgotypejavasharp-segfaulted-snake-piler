@@ -1,0 +1,4 @@
+node_modules/
+ouro-out/
+tests/out/
+*.rs.bk

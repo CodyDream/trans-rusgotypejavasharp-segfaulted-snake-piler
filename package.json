@@ -1,0 +1,18 @@
+{
+  "name": "trans-rusgotypejavasharp-segfaulted-snake-piler",
+  "version": "0.1.0",
+  "description": "Bi-directional chain transpiler: Python <-> TypeScript <-> C# <-> Java <-> Go <-> Rust <-> C++. Walks down-chain to Rust when code needs to run.",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node tests/run.ts",
+    "ouro": "node src/cli.ts"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.7",
+    "typescript": "^5.9.0"
+  }
+}
