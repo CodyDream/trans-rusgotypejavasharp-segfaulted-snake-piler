@@ -11,6 +11,16 @@ walk in either direction. When code needs to actually *run*, everything
 transpiles down-chain to **Rust** — the runtime anchor of the chain. C++ is
 the terminal link: it translates, but the chain does not point back past it.
 
+## Status (v0.1)
+
+Built: the IR spine + pretty-printer, the fixpoint type inferencer, the
+Python frontend (real `ast`), the TypeScript frontend (parses the v1 TS
+dialect — the exact shape the TS backend will emit), and the CLI
+(`langs / status / dump / infer / norm / trans`).
+
+Not built yet (the rest of this README describes the v1 target): backends,
+the chain driver, the non-destructive writer, execution gold checks.
+
 ## The trick
 
 There are no pairwise translators. Every language has exactly **one frontend**
@@ -38,21 +48,22 @@ Requires Node >= 24 (native TypeScript) and Python 3 for the Python frontend
 ```bash
 npm install                 # typescript for typechecking only
 node src/cli.ts langs       # print the chain
+node src/cli.ts infer program.py    # parse + infer, print the typed IR (py, ts)
+node src/cli.ts norm program.py     # normalized IR — diff two frontends' view
+node tests/run.ts           # gold suite (27 checks in v0.1)
 
-# single edge (12 available)
+# single edge (12 available) — needs the target backend (not built yet)
 node src/cli.ts trans 'py->ts'   program.py
-node src/cli.ts trans 'rust->go' main.rs
 
-# walk the whole chain, one artifact per hop
+# walk the whole chain, one artifact per hop (needs backends)
 node src/cli.ts chain program.py            # py -> ... -> cpp
 node src/cli.ts chain main.rs --to py       # rust -> ... -> py
 
-# the money shot: to the far end and back
-node src/cli.ts roundtrip program.py        # py -> ts -> ... -> cpp -> ... -> py
-                                            # final Python output compared to original
+# the money shot: to the far end and back (needs backends)
+node src/cli.ts roundtrip program.py        # final Python output vs original
 
-# run: everything transpiles down to Rust
-node src/cli.ts run program.py              # needs rustc to execute; emits anyway
+# run: everything transpiles down to Rust (needs backends + rustc)
+node src/cli.ts run program.py
 ```
 
 ## Non-destructive guarantee
@@ -86,15 +97,22 @@ branch-declared variables used after the branch.
 
 ## Validation
 
-`node tests/run.ts` — 23 gold checks:
+`node tests/run.ts` — 27 gold checks (the v0.1 set):
 
-- all 12 edges emit and re-parse to structurally identical IR
-- forward chain: TypeScript, Java and C++ hops are executed (node, `java`
-  single-file mode, g++) and their output must equal the original Python
-  program's output
-- backward chain returns to Python with identical output
-- non-destructive guarantee verified byte-for-byte
-- unsupported syntax fails loudly, never silently
+- py and ts frontends parse + infer the smoke program
+- py and ts frontends agree byte-for-byte on normalized IR for the same program
+- dialect canonicalizations verified (`indexOf` → `index`/`find` by receiver
+  type, `xs.join(sep)` → `sep.join(xs)`, `trim` → `strip`,
+  `toUpperCase` → `upper`, `push` → `append`)
+- forrange step forms (`i++`, `i += s`, downward `i -= s`, `i = i + s`)
+- the non-destructive guarantee: parsing never modifies an input file
+  (verified byte-for-byte)
+- 18 unsupported-construct cases fail loudly (`TranspileError` with a line
+  number at the parse layer; never silently)
+
+The execution/round-trip gold checks (all 12 edges re-parse to identical IR,
+forward-chain hops executed with node / `java` / g++, backward chain returning
+to Python) land together with the backends — they are the v1 target.
 
 ## Documented divergences (the honest section)
 
@@ -113,8 +131,8 @@ branch-declared variables used after the branch.
 ```
 src/ir/         typed AST spine + printer
 src/infer/      fixpoint type inferencer
-src/frontends/  py (via python3 ast) ts cs java go rust cpp
-src/backends/   py ts cs java go rust cpp (+ dialect preludes)
+src/frontends/  py (via python3 ast), ts (v1 dialect) — cs java go rust cpp planned
+src/backends/   py ts cs java go rust cpp (+ dialect preludes) — planned
 src/chain/      the 6 bidirectional edges, chain walker
 src/cli.ts      ouro CLI
 tests/          gold suite + demo programs
