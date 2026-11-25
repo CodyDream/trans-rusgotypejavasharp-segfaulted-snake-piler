@@ -465,7 +465,23 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
       case 'pop': return ot.elem;
       case 'index': return TY_INT;
       case 'sort': case 'reverse': case 'clear': return TY_VOID;
-      default: err(`${ctx.where}: unsupported list method '.${e.name}()' (v1: append, pop, index, sort, reverse, clear)`, ctx.where);
+      case 'join':
+        // canonicalize the TS-native form xs.join(sep) into Python's
+        // sep.join(xs): IR always carries the string as the receiver
+        if (e.args.length !== 1) {
+          err(`${ctx.where}: join needs exactly one separator argument`, ctx.where);
+        }
+        if (argTys[0] != null && argTys[0].k !== 'string') {
+          err(`${ctx.where}: join separator must be string, got ${tyShow(argTys[0])}`, ctx.where);
+        }
+        if (ot.elem != null && ot.elem.k !== 'string' && ot.elem.k !== 'any') {
+          err(`${ctx.where}: join needs a list of strings, got list<${tyShow(ot.elem)}>`, ctx.where);
+        }
+        const listExpr = e.obj;
+        e.obj = e.args[0];
+        e.args = [listExpr];
+        return TY_STRING;
+      default: err(`${ctx.where}: unsupported list method '.${e.name}()' (v1: append, pop, index, sort, reverse, clear, join)`, ctx.where);
     }
   }
   if (ot.k === 'string') {

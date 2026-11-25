@@ -436,23 +436,21 @@ class Parser {
   }
 
   private parseForUpdate(varName: string): { delta: Expr; kind: 'inc' | 'dec' } {
+    const nameTok = this.expect('ident', 'as the update target');
+    if (nameTok.v !== varName) {
+      this.err(`forrange update must reassign the loop variable '${varName}'`, nameTok);
+    }
     const t = this.peek();
     if (t.t === '++') { this.next(); return { delta: eInt(1), kind: 'inc' }; }
     if (t.t === '--') { this.next(); return { delta: eInt(1), kind: 'dec' }; }
     if (t.t === '+=') { this.next(); return { delta: this.parseExpr(), kind: 'inc' }; }
     if (t.t === '-=') { this.next(); return { delta: this.parseExpr(), kind: 'dec' }; }
     this.expect('=');
-    const lhs = this.parseExpr();
-    if (lhs.k !== 'var' || lhs.name !== varName) {
-      this.err(`forrange update must reassign the loop variable '${varName}'`, t);
+    const rhs = this.parseExpr();
+    if (rhs.k === 'bin' && (rhs.op === '+' || rhs.op === '-') && rhs.l.k === 'var' && rhs.l.name === varName) {
+      return { delta: rhs.r, kind: rhs.op === '+' ? 'inc' : 'dec' };
     }
-    const opTok = this.peek();
-    if (opTok.t !== '+' && opTok.t !== '-') {
-      this.err("forrange update must be 'i++', 'i += s', 'i--', 'i -= s' or 'i = i ± s'", opTok);
-    }
-    this.next();
-    const delta = this.parseExpr();
-    return { delta, kind: opTok.t === '+' ? 'inc' : 'dec' };
+    this.err("forrange update must be 'i++', 'i += s', 'i--', 'i -= s' or 'i = i ± s'", nameTok);
   }
 
   // -- expressions ----------------------------------------------------------
@@ -628,6 +626,9 @@ class Parser {
       case 'ident': this.next(); return eVar(t.v);
       case '(': {
         this.next();
+        if (this.at('ident') && this.peek(1).t === ':') {
+          this.err('arrow functions / lambdas are not supported in v1', this.peek());
+        }
         const e = this.parseExpr();
         this.expect(')');
         return e;
