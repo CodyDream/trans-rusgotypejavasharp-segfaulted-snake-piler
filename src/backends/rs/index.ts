@@ -76,19 +76,16 @@ impl<V> PyDict<V> {
 trait PyVal {
     fn py_str(&self) -> String;
     fn py_repr(&self) -> String { self.py_str() }
-    fn py_len(&self) -> i64 { unreachable!("len() of a scalar") }
 }
 
 impl PyVal for str {
     fn py_str(&self) -> String { self.to_string() }
     fn py_repr(&self) -> String { format!("'{}'", self) }
-    fn py_len(&self) -> i64 { self.chars().count() as i64 }
 }
 
 impl PyVal for String {
     fn py_str(&self) -> String { self.clone() }
     fn py_repr(&self) -> String { format!("'{}'", self) }
-    fn py_len(&self) -> i64 { self.chars().count() as i64 }
 }
 
 impl PyVal for i64 {
@@ -108,7 +105,6 @@ impl<T: PyVal> PyVal for Vec<T> {
         let parts: Vec<String> = self.iter().map(|e| e.py_repr()).collect();
         format!("[{}]", parts.join(", "))
     }
-    fn py_len(&self) -> i64 { self.len() as i64 }
 }
 
 impl<T: PyVal> PyVal for PyDict<T> {
@@ -119,14 +115,20 @@ impl<T: PyVal> PyVal for PyDict<T> {
         }).collect();
         format!("{{{}}}", parts.join(", "))
     }
-    fn py_len(&self) -> i64 { self.d.len() as i64 }
 }
 
 impl<'a, T: PyVal + ?Sized> PyVal for &'a T {
     fn py_str(&self) -> String { T::py_str(self) }
     fn py_repr(&self) -> String { T::py_repr(self) }
-    fn py_len(&self) -> i64 { T::py_len(self) }
 }
+
+// len() is its own trait: it must work on Vec<Item> etc., whose elements
+// are plain structs that never need PyVal formatting.
+trait PyLen { fn py_len(&self) -> i64; }
+impl PyLen for str { fn py_len(&self) -> i64 { self.chars().count() as i64 } }
+impl PyLen for String { fn py_len(&self) -> i64 { self.chars().count() as i64 } }
+impl<T> PyLen for Vec<T> { fn py_len(&self) -> i64 { self.len() as i64 } }
+impl<T> PyLen for PyDict<T> { fn py_len(&self) -> i64 { self.d.len() as i64 } }
 
 fn print(args: &[&dyn PyVal]) {
     let parts: Vec<String> = args.iter().map(|a| (*a).py_str()).collect();
@@ -243,16 +245,26 @@ function isLiteralExpr(e: Expr): boolean {
 /**
  * Emit a value going into a "slot" of type slotTy (variable, field, argument,
  * return). Python copies on bind; Rust moves — non-Copy non-literal values
- * need .clone(), string literals need .to_string() to become owned.
+ * need .clone(), string literals need .to_string() to become owned, and
+ * list/map literals slot their ELEMENTS the same way (Vec<String> cannot
+ * hold &str).
  */
 function slotVal(e: Expr, slotTy: Ty | null): string {
-  const raw = emitExpr(e);
-  if (slotTy == null || isCopyTy(slotTy)) return raw;
+  if (slotTy == null || isCopyTy(slotTy)) return emitExpr(e);
   if (slotTy.k === 'string') {
+    const raw = emitExpr(e);
     return e.k === 'str' ? `${raw}.to_string()` : `${raw}.clone()`;
   }
-  if (isLiteralExpr(e)) return raw;
-  return `${raw}.clone()`;
+  if (slotTy.k === 'list' && e.k === 'list') {
+    return e.elems.length === 0
+      ? 'Vec::new()'
+      : `vec![${e.elems.map(el => slotVal(el, slotTy.elem)).join(', ')}]`;
+  }
+  if (slotTy.k === 'map' && e.k === 'map') {
+    return `pymap(&[${e.entries.map(en => `("${rsEscape(en.key)}", ${slotVal(en.val, slotTy.val)})`).join(', ')}])`;
+  }
+  if (isLiteralExpr(e)) return emitExpr(e);
+  return `${emitExpr(e)}.clone()`;
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +319,7 @@ function emitMethod(e: Extract<Expr, { k: 'method' }>): string {
           : `${o}.sort()`;
       case 'reverse': return `${o}.reverse()`;
       case 'clear': return `${o}.clear()`;
-      case 'join': return `${o}.join(&${emitExpr(a[0])})`;   // IR: sep.join(xs) -> xs.join(sep)
+      case 'join': return `${emitExpr(a[0])}.join(&${o})`;   // IR: sep.join(xs) -> xs.join(sep)
       default: err(`unsupported method '${e.name}' reached the backend (inferencer bug)`);
     }
   }
@@ -322,7 +334,7 @@ function emitMethod(e: Extract<Expr, { k: 'method' }>): string {
       case 'endswith': return `${o}.ends_with(${emitExpr(a[0])})`;
       case 'find': return `pystr_find(&${o}, ${emitExpr(a[0])})`;
       case 'isdigit': return `pyisdigit(&${o})`;
-      case 'join': return `${o}.join(&${emitExpr(a[0])})`;
+      case 'join': return `${emitExpr(a[0])}.join(&${o})`;   // IR: sep.join(xs) -> xs.join(sep)
       default: err(`unsupported method '${e.name}' reached the backend (inferencer bug)`);
     }
   }
@@ -352,16 +364,26 @@ function emitCall(e: Extract<Expr, { k: 'call' }>): string {
   return `${ident(e.name)}(${args})`;
 }
 
+/** Default bin emission: raw ops, widening mixed int/float to f64 (Python semantics). */
+function emitDefaultBin(e: Extract<Expr, { k: 'bin' }>): string {
+  const lf = e.lty?.k === 'float';
+  const rf = e.rty?.k === 'float';
+  if (lf !== rf && (e.lty?.k === 'int' || e.lty?.k === 'float') && (e.rty?.k === 'int' || e.rty?.k === 'float')) {
+    return `(${emitExpr(e.l)}) as f64 ${e.op} (${emitExpr(e.r)}) as f64`;
+  }
+  return `${wrap(e.l)} ${e.op} ${wrap(e.r)}`;
+}
+
 function emitBin(e: Extract<Expr, { k: 'bin' }>): string {
   switch (e.op) {
     case '/': return `((${emitExpr(e.l)}) as f64 / (${emitExpr(e.r)}) as f64)`;   // Python true division
     case '//': return `idiv(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case '%': return `imod(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case '+':
-      if (e.rty?.k === 'string' || e.l.k === 'str' && e.r.k === 'str') {
+      if (e.rty?.k === 'string' || e.lty?.k === 'string') {
         return `format!("{}{}", ${emitExpr(e.l)}, ${emitExpr(e.r)})`;
       }
-      return `${wrap(e.l)} + ${wrap(e.r)}`;
+      return emitDefaultBin(e);
     case 'in': case 'notin': {
       const r = emitExpr(e.r);
       const l = emitExpr(e.l);
@@ -371,7 +393,7 @@ function emitBin(e: Extract<Expr, { k: 'bin' }>): string {
         : err("'in' without a container type (inferencer bug)");
       return e.op === 'notin' ? `!(${inner})` : inner;
     }
-    default: return `${wrap(e.l)} ${e.op} ${wrap(e.r)}`;
+    default: return emitDefaultBin(e);
   }
 }
 
@@ -392,7 +414,7 @@ function emitExpr(e: Expr): string {
     case 'index':
       return e.objTy?.k === 'map'
         ? `${emitExpr(e.obj)}.index(&${emitExpr(e.idx)})`
-        : `${wrap(e.obj)}[${emitExpr(e.idx)}].clone()`;
+        : `${wrap(e.obj)}[(${emitExpr(e.idx)}) as usize].clone()`;   // i64 -> usize; OOB panics like Python
     case 'list':
       return e.elems.length === 0
         ? `Vec::new()`
@@ -400,8 +422,9 @@ function emitExpr(e: Expr): string {
     case 'map':
       return `pymap(&[${e.entries.map(en => `("${rsEscape(en.key)}", ${emitExpr(en.val)})`).join(', ')}])`;
     case 'new': {
-      // ctor args are always literals or fresh values (new/method calls) in v1
-      const args = e.args.map(x => emitExpr(x)).join(', ');
+      // ctor args slot-copy by the class's declared parameter types
+      const params = clsParams.get(e.cls);
+      const args = e.args.map((x, i) => slotVal(x, params?.[i]?.ty ?? null)).join(', ');
       return `${e.cls}::new(${args})`;
     }
     case 'interp': return emitInterp(e.parts);
@@ -425,9 +448,9 @@ function forrangeHead(s: Extract<Stmt, { k: 'forrange' }>): string {
   if (step.k === 'un' && step.op === '-' && step.e.k === 'int') {
     const n = step.e.v;
     if (n === 0) err('forrange step cannot be 0');
-    // range(start, stop, -n) yields start down to stop+1: (stop+n..=start).rev()
-    const nStr = n === 1 ? '1' : String(n);
-    const head = `((${stop}) + ${nStr}..=(${start})).rev()`;
+    // range(start, stop, -n) yields start, start-n, ... down to the smallest
+    // value > stop: (stop+1..=start).rev() (+ step_by for |n| > 1)
+    const head = `((${stop}) + 1..=(${start})).rev()`;
     return `for ${v} in ${n === 1 ? head : `${head}.step_by(${n})`} {`;
   }
   err('forrange with dynamic step is not supported in v1 (literal or negated-literal step required)');
@@ -457,7 +480,7 @@ function emitStmt(s: Stmt, out: string[], ind: number): void {
         if (t.objTy?.k === 'map') {
           out.push(`${pad}${emitExpr(t.obj)}.set(&${emitExpr(t.idx)}, ${slotVal(s.value, s.valueTy ?? null)});`);
         } else {
-          out.push(`${pad}${emitExpr(t.obj)}[${emitExpr(t.idx)}] = ${slotVal(s.value, s.valueTy ?? null)};`);
+          out.push(`${pad}${emitExpr(t.obj)}[(${emitExpr(t.idx)}) as usize] = ${slotVal(s.value, s.valueTy ?? null)};`);
         }
       } else err('unsupported assignment target reached the backend (inferencer bug)');
       break;
@@ -594,10 +617,15 @@ function emitFun(f: FunDecl, out: string[], clsName: string): void {
 
 let ctxRetTy: Ty | null = null;   // current function's return type (slot-copy on return)
 let ctxThis = 'self';             // receiver name inside ctor bodies ('obj')
+let clsParams: Map<string, { name: string; ty: Ty | null }[]>;   // ctor param types for slot-copy
 
 export function emitRs(m: Module): string {
   ctxRetTy = null;
   ctxThis = 'self';
+  clsParams = new Map();
+  for (const item of m.items) {
+    if ('fields' in item && item.ctor) clsParams.set(item.name, item.ctor.params);
+  }
   const clsName = m.name.charAt(0).toUpperCase() + m.name.slice(1).replace(/[^A-Za-z0-9_$]/g, '');
   const out: string[] = [
     `// generated by ouro — 100% native Rust, no FFI / C ABI (run: rustc <this-file>)`,

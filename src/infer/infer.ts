@@ -134,12 +134,16 @@ function setClassFieldTy(ctx: Ctx, name: string, ty: Ty): void {
 function walkStmt(s: Stmt, ctx: Ctx): void {
   switch (s.k) {
     case 'vardecl': {
+      // ALWAYS walk the init: exprTy stamps method/call/bin nodes the
+      // backends dispatch on (objTy, argTys, rty) — annotated decls included
+      const vt = exprTy(s.init, ctx);
       if (s.ty == null) {
-        const t = exprTy(s.init, ctx);
-        if (t != null) {
-          if (!compatAll(t, s.init, ctx)) err(`${ctx.where}: cannot assign ${tyShow(t)} to '${s.name}' (type mismatch)`, ctx.where);
-          s.ty = t;
+        if (vt != null) {
+          if (!compatAll(vt, s.init, ctx)) err(`${ctx.where}: cannot assign ${tyShow(vt)} to '${s.name}' (type mismatch)`, ctx.where);
+          s.ty = vt;
         }
+      } else if (vt != null && !compat(s.ty, vt)) {
+        err(`${ctx.where}: cannot assign ${tyShow(vt)} to '${s.name}' of type ${tyShow(s.ty)}`, ctx.where);
       }
       if (s.ty != null) fillLiteralTys(s.init, s.ty, ctx);
       ctx.vars.set(s.name, { ty: s.ty, declNode: s });
@@ -395,6 +399,8 @@ function binTy(e: Extract<Expr, { k: 'bin' }>, ctx: Ctx): Ty | null {
     || op === '&&' || op === '||' || op === 'in' || op === 'notin') {
     const lt = exprTy(e.l, ctx);
     const rt = exprTy(e.r, ctx);
+    if (lt != null) e.lty = lt;   // stamped: mixed int/float comparisons widen in Rust
+    if (rt != null) e.rty = rt;
     if (op === 'in' || op === 'notin') {
       if (rt != null) e.rty = rt;   // stamped: backend dispatches string/list/map membership on the container type
       if (lt != null && rt != null) {

@@ -458,7 +458,7 @@ function emitFun(f: FunDecl, out: string[], clsName: string): void {
 function emitClass(c: ClassDecl, out: string[], clsName: string): void {
   if (c.name === clsName) err(`class '${c.name}' collides with the module class name`);
   out.push(`    class ${ident(c.name)} {`);
-  for (const f of c.fields) out.push(`        ${emitTy(f.ty)} ${ident(f.name)};`);
+  for (const f of c.fields) out.push(`        public ${emitTy(f.ty)} ${ident(f.name)};`);   // public: sibling nested classes read each other's fields
   if (c.ctor) {
     const params = c.ctor.params.map(p => `${emitTy(p.ty)} ${ident(p.name)}`).join(', ');
     if (c.fields.length) out.push('');
