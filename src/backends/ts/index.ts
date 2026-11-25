@@ -182,7 +182,7 @@ function emitBin(e: Extract<Expr, { k: 'bin' }>): string {
     case '%': return `imod(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case 'in': return `isin(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case 'notin': return `isnotin(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
-    default: return `${wrap(e.l)} ${e.op} ${wrap(e.r)}`;
+    default: return `${wrap(e.l)} ${e.op} ${wrap(e.r)}`;   // TS '/' is already true division
   }
 }
 

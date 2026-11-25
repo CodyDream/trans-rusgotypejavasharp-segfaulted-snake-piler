@@ -284,6 +284,7 @@ function emitCall(name: string, args: Expr[]): string {
 
 function emitBin(e: Extract<Expr, { k: 'bin' }>): string {
   switch (e.op) {
+    case '/': return `((double)(${emitExpr(e.l)}) / (${emitExpr(e.r)}))`;   // Python true division
     case '//': return `idiv(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case '%': return `imod(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
     case 'in': return `isin(${emitExpr(e.l)}, ${emitExpr(e.r)})`;
