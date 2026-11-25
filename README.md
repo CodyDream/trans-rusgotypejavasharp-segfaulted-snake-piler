@@ -47,9 +47,27 @@ literals in call arguments and returns now take the contextual element type
 (C# has no target typing to fall back on), and method-call argument types
 are filled from the container's declared value type.
 
-Not built yet (the rest of this README describes the v1 target): the py/go/
-cpp backends, the chain driver, the non-destructive writer, full chain
-execution.
+Two more layers landed the same way: the **C++ frontend** (parses the v1 C++
+dialect — real, g++-compilable C++ whose runtime surface is
+`test/cpp_prelude.hpp`) and the **Go backend** (single-file native Go, pure
+std, `go run`). The same pipeline now ports a C++ library end to end:
+**`demo/matrixlib.cpp`** — an integer-matrix library (`Matrix` class with
+rows/cols/cells, transpose, multiply, scale, add, trace, rowsums, element
+access) with its C++ driver. The g++ oracle compiles both dialect files
+against the prelude header as one translation unit — exactly like the linker
+merges the modules into one IR program — and the linked port runs
+byte-identically in **go, rust, java, cs and ts** against it. Porting C++
+surfaced and fixed four more real gaps: the inferencer now rewrites a call
+whose name is a class into construction (the parser can't know cross-module
+classes; C++/Python spell construction as a call), the Rust backend indexes
+nested assignment targets raw (`cells[j][i] = v` must mutate the stored row,
+not the clone a read would return — Go/Java/C# are reference-based and were
+correct), the TypeScript frontend chains `int[][]` suffixes into
+`list<list<int>>`, and `int main()` — C++ requires that spelling — is the
+entry everywhere (the TS backend calls explicit main for non-py/ts sources).
+
+Not built yet (the rest of this README describes the v1 target): the py/cpp
+backends, the chain driver, the non-destructive writer, full chain execution.
 
 ## The trick
 
@@ -80,7 +98,7 @@ npm install                 # typescript for typechecking only
 node src/cli.ts langs       # print the chain
 node src/cli.ts infer program.py    # parse + infer, print the typed IR (py, ts)
 node src/cli.ts norm program.py     # normalized IR — diff two frontends' view
-node tests/run.ts           # gold suite (43 checks in v0.1)
+node tests/run.ts           # gold suite (53 checks in v0.1)
 
 # transpile — works today (output to stdout):
 node src/cli.ts trans 'py->ts'   program.py    # run with: node out.ts
@@ -135,7 +153,7 @@ branch-declared variables used after the branch.
 
 ## Validation
 
-`node tests/run.ts` — 43 gold checks (the v0.1 set):
+`node tests/run.ts` — 53 gold checks (the v0.1 set):
 
 - py and ts frontends parse + infer the smoke program
 - py and ts frontends agree byte-for-byte on normalized IR for the same program
@@ -151,14 +169,20 @@ branch-declared variables used after the branch.
   driven by `graphlib_driver.ts`) — the library alone compiles to a silent
   rust binary, and the linked program's rust, java, dotnet and node outputs
   all equal the `graphlib_all.py` python3 oracle**
+- **port: the matrixlib C++ library (`matrixlib.cpp` + `matrixlib_main.cpp`
+  authored in the v1 C++ dialect) — the g++ oracle compiles both files
+  against `cpp_prelude.hpp` as one translation unit, and the linked port's
+  go, rust, java, dotnet and node outputs all equal it byte-for-byte**
 - dialect canonicalizations verified (`indexOf` → `index`/`find` by receiver
   type, `xs.join(sep)` → `sep.join(xs)`, `trim` → `strip`,
   `toUpperCase` → `upper`, `push` → `append`)
 - forrange step forms (`i++`, `i += s`, downward `i -= s`, `i = i + s`)
 - the non-destructive guarantee: parsing never modifies an input file
   (verified byte-for-byte)
-- 18 unsupported-construct cases fail loudly (`TranspileError` with a line
-  number at the parse layer; never silently)
+- 23 unsupported-construct cases fail loudly (`TranspileError` with a line
+  number at the parse layer; never silently) — including four C++ v1
+  rejections (`int` spelling, `auto` outside foreach, pointers,
+  `std::`, heap `new`)
 
 Remaining for v1: all 12 edges re-parsing to identical IR and the full
 forward/backward chain executed — they land with the remaining backends.

@@ -20,10 +20,12 @@ import { join } from 'node:path';
 
 import { parsePyFile } from '../src/frontends/py/index.ts';
 import { parseTsFile } from '../src/frontends/ts/index.ts';
+import { parseCppFile } from '../src/frontends/cpp/index.ts';
 import { emitTs } from '../src/backends/ts/index.ts';
 import { emitJava } from '../src/backends/java/index.ts';
 import { emitCs } from '../src/backends/cs/index.ts';
 import { emitRs } from '../src/backends/rs/index.ts';
+import { emitGo } from '../src/backends/go/index.ts';
 import { linkModules } from '../src/link.ts';
 import type { Module } from '../src/ir/types.ts';
 import { inferModule } from '../src/infer/infer.ts';
@@ -52,12 +54,12 @@ function check(name: string, fn: () => void): void {
 
 // -- helpers ----------------------------------------------------------------
 
-function parseTyped(lang: 'py' | 'ts', path: string): string {
-  const m = inferModule(lang === 'py' ? parsePyFile(path) : parseTsFile(path));
+function parseTyped(lang: 'py' | 'ts' | 'cpp', path: string): string {
+  const m = inferModule(lang === 'py' ? parsePyFile(path) : lang === 'cpp' ? parseCppFile(path) : parseTsFile(path));
   return dumpNormalized(m);
 }
 
-function parseSrc(lang: 'py' | 'ts', src: string): { norm: string } | { error: TranspileError } {
+function parseSrc(lang: 'py' | 'ts' | 'cpp', src: string): { norm: string } | { error: TranspileError } {
   const dir = mkdtempSync(join(tmpdir(), 'ouro-gold-'));
   const file = join(dir, `case.${lang}`);
   writeFileSync(file, src);
@@ -69,7 +71,7 @@ function parseSrc(lang: 'py' | 'ts', src: string): { norm: string } | { error: T
   }
 }
 
-function expectLoudFailure(name: string, lang: 'py' | 'ts', src: string, mustInclude: string): void {
+function expectLoudFailure(name: string, lang: 'py' | 'ts' | 'cpp', src: string, mustInclude: string): void {
   const r = parseSrc(lang, src);
   if (!('error' in r)) {
     throw new Error(`expected a loud failure containing "${mustInclude}", but it parsed cleanly`);
@@ -436,10 +438,114 @@ check('port: graphlib py lib + ts entry linked -> node equals python3 oracle', (
   if (run(process.execPath, [tsPath]) !== expected) throw new Error('ts ported output diverged from python3');
 });
 
+// -- the C++ frontend + the Go backend: matrixlib ported FROM C++ --------------
+// The library (demo/matrixlib.cpp) and entry (demo/matrixlib_main.cpp) are
+// valid C++: the g++ oracle compiles them against test/cpp_prelude.hpp as ONE
+// translation unit, exactly like the linker merges the modules into one IR
+// program. Every built backend must reproduce that output byte-for-byte.
+
+const MATRIX_LIB = join(import.meta.dirname!, '..', 'demo', 'matrixlib.cpp');
+const MATRIX_MAIN = join(import.meta.dirname!, '..', 'demo', 'matrixlib_main.cpp');
+
+function linkMatrix(): Module {
+  const merged = linkModules(parseCppFile(MATRIX_MAIN), [parseCppFile(MATRIX_LIB)]);
+  return inferModule(merged);
+}
+
+let MATRIX_ORACLE: string | null = null;
+function matrixOracle(): string {
+  if (MATRIX_ORACLE == null) {
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-matrix-'));
+    const all = join(dir, 'matrix_all.cpp');
+    writeFileSync(all, readFileSync(MATRIX_LIB, 'utf8') + '\n' + readFileSync(MATRIX_MAIN, 'utf8'));
+    const c = spawnSync('g++', ['-std=c++17', '-w', '-include', join(import.meta.dirname!, '..', 'test', 'cpp_prelude.hpp'), all, '-o', join(dir, 'matrix_oracle')], { encoding: 'utf8' });
+    if (c.status !== 0) throw new Error(`g++ failed: ${(c.stderr || '').slice(0, 400)}`);
+    MATRIX_ORACLE = run(join(dir, 'matrix_oracle'), []);
+  }
+  return MATRIX_ORACLE;
+}
+
+// go may be on PATH or installed rootlessly at the workspace path
+function findGo(): string | null {
+  for (const cmd of ['go', '/home/z/my-project/go-toolchain/go/bin/go']) {
+    if (spawnSync(cmd, ['version'], { encoding: 'utf8' }).status === 0) return cmd;
+  }
+  return null;
+}
+const GO = findGo();
+const GO_ENV = { GOCACHE: '/home/z/my-project/.gocache', GOPATH: '/home/z/my-project/.gopath' };
+
+// NOTE: no emitTs re-parse identity check here — a C++ module's `int main()`
+// must be CALLED in the emitted TS (cpp->ts runs it), and that top-level call
+// is main-invocation glue, not IR; the exec checks below verify behavior.
+
+if (RUSTC) {
+  check('port: matrixlib cpp lib + cpp entry linked -> rust equals g++ oracle', () => {
+    const expected = matrixOracle();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const rsPath = join(dir, 'matrix_port.rs');
+    writeFileSync(rsPath, emitRs(linkMatrix()));
+    const prog = join(dir, 'matrix_rs');
+    const c = spawnSync(RUSTC, ['-O', rsPath, '-o', prog], { encoding: 'utf8', env: { ...process.env, ...RUST_ENV } });
+    if (c.status !== 0) throw new Error(`rustc failed: ${(c.stderr || '').slice(0, 400)}`);
+    if (run(prog, []) !== expected) throw new Error('rust ported output diverged from g++');
+  });
+} else {
+  console.log('skip  port matrixlib -> rust (no rustc available)');
+}
+
+if (GO) {
+  check('port: matrixlib cpp lib + cpp entry linked -> go equals g++ oracle', () => {
+    const expected = matrixOracle();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const goPath = join(dir, 'matrix_port.go');
+    writeFileSync(goPath, emitGo(linkMatrix()));
+    const prog = join(dir, 'matrix_go');
+    const c = spawnSync(GO, ['build', '-o', prog, goPath], { encoding: 'utf8', env: { ...process.env, ...GO_ENV } });
+    if (c.status !== 0) throw new Error(`go build failed: ${(c.stderr || '').slice(0, 400)}`);
+    if (run(prog, []) !== expected) throw new Error('go ported output diverged from g++');
+  });
+} else {
+  console.log('skip  port matrixlib -> go (no Go toolchain)');
+}
+
+if (HAS_JAVA) {
+  check('port: matrixlib cpp lib + cpp entry linked -> java equals g++ oracle', () => {
+    const expected = matrixOracle();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const javaPath = join(dir, 'matrixlib_main.java');
+    writeFileSync(javaPath, emitJava(linkMatrix()));
+    if (run('java', [javaPath]) !== expected) throw new Error('java ported output diverged from g++');
+  });
+} else {
+  console.log('skip  port matrixlib -> java (no JDK)');
+}
+
+if (DOTNET) {
+  check('port: matrixlib cpp lib + cpp entry linked -> dotnet equals g++ oracle', () => {
+    const expected = matrixOracle();
+    const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+    const csPath = join(dir, 'matrix_port.cs');
+    writeFileSync(csPath, emitCs(linkMatrix()));
+    const actual = run(DOTNET, ['run', csPath], DOTNET.startsWith('/') ? { DOTNET_ROOT: '/home/z/my-project/.dotnet' } : undefined);
+    if (actual !== expected) throw new Error('cs ported output diverged from g++');
+  });
+} else {
+  console.log('skip  port matrixlib -> cs (no .NET SDK)');
+}
+
+check('port: matrixlib cpp lib + cpp entry linked -> node equals g++ oracle', () => {
+  const expected = matrixOracle();
+  const dir = mkdtempSync(join(tmpdir(), 'ouro-port-'));
+  const tsPath = join(dir, 'matrix_port.ts');
+  writeFileSync(tsPath, emitTs(linkMatrix()));
+  if (run(process.execPath, [tsPath]) !== expected) throw new Error('ts ported output diverged from g++');
+});
+
 
 // -- loud failures ------------------------------------------------------------
 
-const LOUD: [string, 'py' | 'ts', string, string][] = [
+const LOUD: [string, 'py' | 'ts' | 'cpp', string, string][] = [
   ['py: imports', 'py', 'import os\n', 'imports not supported'],
   ['py: lambdas', 'py', 'f = lambda x: x\n', "expression 'Lambda' not supported"],
   ['py: try/except', 'py', 'try:\n    x = 1\nexcept Exception:\n    x = 2\n', "statement 'Try' not supported"],
@@ -458,6 +564,11 @@ const LOUD: [string, 'py' | 'ts', string, string][] = [
   ['ts: generics beyond Map', 'ts', 'let p = new Box<int>(1);\n', 'generics beyond list/map'],
   ['ts: top-level import', 'ts', 'import { readFileSync } from "node:fs";\n', 'top level is not supported'],
   ['ts: for-in', 'ts', 'for (const k in [1, 2]) {\n  print(k);\n}\n', 'for-in is not part of the dialect'],
+  ['cpp: int spelling', 'cpp', 'long f() {\n  int x = 1;\n  return x;\n}\n', "spells integers 'long'"],
+  ['cpp: auto outside foreach', 'cpp', 'long f() {\n  auto x = 1;\n  return x;\n}\n', "'auto' is only allowed"],
+  ['cpp: pointers', 'cpp', 'long f(long* p) {\n  return 0;\n}\n', 'reference/pointer'],
+  ['cpp: std qualifications', 'cpp', 'long f() {\n  std::string s = "x";\n  return 0;\n}\n', "'std::' qualifications"],
+  ['cpp: heap new', 'cpp', 'class C {\npublic:\n    long v;\n};\n\nlong f() {\n    C* c = new C();\n    return 0;\n}\n', "'new' (heap allocation)"],
 ];
 
 for (const [name, lang, src, must] of LOUD) {
