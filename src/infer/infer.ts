@@ -224,6 +224,7 @@ function walkStmt(s: Stmt, ctx: Ctx): void {
     }
     case 'foreach': {
       const it = exprTy(s.iter, ctx);
+      if (it != null) s.iterTy = it;   // stamped for backend dispatch (list of vs map keySet)
       if (it != null && s.varTy == null) {
         if (it.k === 'list') s.varTy = it.elem;
         else if (it.k === 'map') s.varTy = TY_STRING;   // for k in dict: iterates keys
@@ -324,6 +325,7 @@ function exprTy(e: Expr, ctx: Ctx): Ty | null {
       const ot = exprTy(e.obj, ctx);
       const it = exprTy(e.idx, ctx);
       if (ot == null) return null;
+      e.objTy = ot;   // stamped for backend dispatch (list [] vs map helper)
       if (ot.k === 'string') err(`${ctx.where}: string indexing unsupported in v1`, ctx.where);
       if (ot.k === 'list') {
         if (it != null && it.k !== 'int') err(`${ctx.where}: list index must be int, got ${tyShow(it)}`, ctx.where);
@@ -447,6 +449,7 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
   const ot = exprTy(e.obj, ctx);
   const argTys = e.args.map(a => exprTy(a, ctx));
   if (ot == null) return null;
+  e.objTy = ot;   // stamped for backend dispatch (container methods vs class methods)
 
   // canonicalize the neutral member name the TS backend emits for both
   // list.index and string.find — IR always carries the canonical name

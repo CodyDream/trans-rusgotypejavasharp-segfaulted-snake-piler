@@ -85,9 +85,9 @@ export type Expr =
   | { k: 'bin'; op: BinOp; l: Expr; r: Expr }
   | { k: 'un'; op: UnOp; e: Expr }
   | { k: 'call'; name: string; args: Expr[] }               // free fn / conversion / len()
-  | { k: 'method'; obj: Expr; name: string; args: Expr[] }
+  | { k: 'method'; obj: Expr; name: string; args: Expr[]; objTy?: Ty }  // objTy stamped by inferencer
   | { k: 'field'; obj: Expr; name: string }
-  | { k: 'index'; obj: Expr; idx: Expr }
+  | { k: 'index'; obj: Expr; idx: Expr; objTy?: Ty }        // objTy stamped by inferencer: list [] vs map helper
   | { k: 'list'; elems: Expr[]; elemTy?: Ty }
   | { k: 'map'; entries: { key: string; val: Expr }[]; valTy?: Ty }
   | { k: 'new'; cls: string; args: Expr[] }                 // constructor call
@@ -105,7 +105,7 @@ export type Stmt =
   | { k: 'if'; cond: Expr; then: Stmt[]; elifs: { cond: Expr; body: Stmt[] }[]; els: Stmt[] | null }
   | { k: 'while'; cond: Expr; body: Stmt[] }
   | { k: 'forrange'; varName: string; start: Expr; stop: Expr; step: Expr; body: Stmt[] }
-  | { k: 'foreach'; varName: string; varTy: Ty | null; iter: Expr; body: Stmt[] }
+  | { k: 'foreach'; varName: string; varTy: Ty | null; iter: Expr; iterTy?: Ty; body: Stmt[] }  // iterTy stamped by inferencer
   | { k: 'break' }
   | { k: 'continue' }
   | { k: 'print'; args: Expr[] };                            // space-joined args + newline
@@ -147,8 +147,9 @@ export type Item = FunDecl | ClassDecl;
 
 export interface Module {
   name: string;          // module/file name (no extension)
-  sourceLang: string;    // 'py' | 'cs' | 'java' | 'go' | 'rust' | 'cpp'
+  sourceLang: string;    // 'py' | 'ts' | 'cs' | 'java' | 'go' | 'rust' | 'cpp'
   items: Item[];
+  implicitMain?: boolean; // main was synthesized from module-level statements
 }
 
 // ---------------------------------------------------------------------------

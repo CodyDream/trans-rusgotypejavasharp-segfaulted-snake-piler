@@ -154,5 +154,5 @@ export function parsePyFile(filePath: string): Module {
     items.push({ name: 'main', params: [], ret: TY_VOID, body: convBody(ir.mainBody) });
   }
   const name = basename(filePath).replace(/\.[^.]+$/, '');
-  return { name, sourceLang: 'py', items };
+  return { name, sourceLang: 'py', items, implicitMain: hasMainBody };
 }
