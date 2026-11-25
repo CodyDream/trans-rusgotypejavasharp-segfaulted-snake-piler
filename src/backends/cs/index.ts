@@ -189,12 +189,15 @@ const PRELUDE = `  // ---- prelude: Python-flavored runtime helpers ----
     }
   }`;
 
+let csRetTy: Ty | null = null;   // current function/method return type (typed list/map returns)
+
 function err(msg: string): never {
   throw new TranspileError(msg, 'cs', null);
 }
 
 function ident(name: string): string {
-  if (CS_RESERVED.has(name)) err(`'${name}' is a reserved word in C# — rename it in the source`);
+  // C# verbatim identifiers let any keyword stay a variable/field/method name
+  if (CS_RESERVED.has(name)) return `@${name}`;
   if (PRELUDE_NAMES.has(name)) err(`'${name}' collides with the C# prelude — rename it in the source`);
   return name;
 }
@@ -386,9 +389,21 @@ function emitStmt(s: Stmt, out: string[], ind: number): void {
     case 'expr':
       out.push(`${pad}${emitExpr(s.e)};`);
       break;
-    case 'return':
-      out.push(s.v ? `${pad}return ${emitExpr(s.v)};` : `${pad}return;`);
+    case 'return': {
+      if (!s.v) { out.push(`${pad}return;`); break; }
+      // list/map literals in a return take the FUNCTION's element type —
+      // `return []` cannot fall back to int (Java gets this via target typing)
+      let e = emitExpr(s.v);
+      if (s.v.k === 'list' && csRetTy?.k === 'list') {
+        e = s.v.elems.length === 0
+          ? `new ${emitTy(csRetTy)}()`
+          : `new ${emitTy(csRetTy)} { ${s.v.elems.map(x => emitExpr(x)).join(', ')} }`;
+      } else if (s.v.k === 'map' && csRetTy?.k === 'map') {
+        e = `PyMap<${boxTy(csRetTy.val)}>(${s.v.entries.flatMap(en => [JSON.stringify(en.key), emitExpr(en.val)]).join(', ')})`;
+      }
+      out.push(`${pad}return ${e};`);
       break;
+    }
     case 'if': {
       out.push(`${pad}if (${emitExpr(s.cond)}) {`);
       emitBody(s.then, out, ind + 1);
@@ -451,7 +466,9 @@ function emitFun(f: FunDecl, out: string[], clsName: string): void {
   }
   if (f.name === clsName) err(`function '${f.name}' collides with the module class name`);
   out.push(`    static ${emitTy(f.ret)} ${ident(f.name)}(${params}) {`);
+  csRetTy = f.ret ?? null;
   emitBody(f.body, out, 3);
+  csRetTy = null;
   out.push('    }', '');
 }
 
@@ -469,7 +486,9 @@ function emitClass(c: ClassDecl, out: string[], clsName: string): void {
   for (const meth of c.methods) {
     const params = meth.params.map(p => `${emitTy(p.ty)} ${ident(p.name)}`).join(', ');
     out.push(`        public ${emitTy(meth.ret)} ${ident(meth.name)}(${params}) {`);
+    csRetTy = meth.ret ?? null;
     emitBody(meth.body, out, 4);
+    csRetTy = null;
     out.push('        }', '');
   }
   out.push('    }', '');

@@ -465,6 +465,7 @@ function callTy(e: Extract<Expr, { k: 'call' }>, ctx: Ctx): Ty | null {
     if (pt != null && at != null && !compat(pt, at)) {
       err(`${ctx.where}: argument ${i + 1} of '${e.name}' is ${tyShow(at)}, expected ${tyShow(pt)}`, ctx.where);
     }
+    if (pt != null) fillLiteralTys(e.args[i], pt, ctx);   // empty [] / {} literal takes the param's type
   }
   return f!.ret;
 }
@@ -489,6 +490,7 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
         if (argTys[0] != null && !compat(ot.elem, argTys[0])) {
           err(`${ctx.where}: append expects ${tyShow(ot.elem)}, got ${tyShow(argTys[0])}`, ctx.where);
         }
+        fillLiteralTys(e.args[0], ot.elem, ctx);   // empty [] literal takes the list's elem type
         return TY_VOID;
       case 'pop': return ot.elem;
       case 'index': return TY_INT;
@@ -531,6 +533,7 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
         if (e.args.length === 1) {
           err(`${ctx.where}: d.get(k) unsupported (missing key yields None); use d[k] or d.get(k, default)`, ctx.where);
         }
+        fillLiteralTys(e.args[1], ot.val, ctx);   // empty [] / {} default literal takes the map's value type
         return ot.val;
       case 'keys': return { k: 'list', elem: TY_STRING };
       case 'values': return { k: 'list', elem: ot.val };
