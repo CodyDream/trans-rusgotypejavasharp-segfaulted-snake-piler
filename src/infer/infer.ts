@@ -406,6 +406,8 @@ function binTy(e: Extract<Expr, { k: 'bin' }>, ctx: Ctx): Ty | null {
   // arithmetic + - * %
   const lt = exprTy(e.l, ctx);
   const rt = exprTy(e.r, ctx);
+  if (lt != null) e.lty = lt;   // stamped: string '+' detection in the Rust backend
+  if (rt != null) e.rty = rt;
   if (lt == null || rt == null) return null;
   if (op === '+') {
     if (lt.k === 'string' && rt.k === 'string') return TY_STRING;

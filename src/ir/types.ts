@@ -82,7 +82,7 @@ export type Expr =
   | { k: 'null' }
   | { k: 'var'; name: string }
   | { k: 'this' }
-  | { k: 'bin'; op: BinOp; l: Expr; r: Expr; rty?: Ty }      // rty stamped by inferencer ('in' operand dispatch)
+  | { k: 'bin'; op: BinOp; l: Expr; r: Expr; lty?: Ty; rty?: Ty }  // lty/rty stamped by inferencer ('+' string detection, 'in' dispatch)
   | { k: 'un'; op: UnOp; e: Expr }
   | { k: 'call'; name: string; args: Expr[]; argTys?: (Ty | null)[] }       // argTys stamped by inferencer (slot-copy emission)
   | { k: 'method'; obj: Expr; name: string; args: Expr[]; objTy?: Ty; argTys?: (Ty | null)[] }  // stamped by inferencer
