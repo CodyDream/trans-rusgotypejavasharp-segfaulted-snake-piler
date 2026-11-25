@@ -16,6 +16,7 @@
 
 import { parsePyFile } from './frontends/py/index.ts';
 import { parseTsFile } from './frontends/ts/index.ts';
+import { parseCppFile } from './frontends/cpp/index.ts';
 import { emitTs } from './backends/ts/index.ts';
 import { emitJava } from './backends/java/index.ts';
 import { emitCs } from './backends/cs/index.ts';
@@ -36,6 +37,7 @@ export const EXT: Record<string, string> = {
 const FRONTENDS: Record<string, (path: string) => Module> = {
   py: parsePyFile,
   ts: parseTsFile,
+  cpp: parseCppFile,
 };
 
 /** Layer 3 registry: language -> code emitter. */
