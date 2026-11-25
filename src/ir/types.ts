@@ -99,7 +99,7 @@ export type Expr =
 
 export type Stmt =
   | { k: 'vardecl'; name: string; ty: Ty | null; init: Expr }
-  | { k: 'assign'; target: Expr; value: Expr; valueTy?: Ty | null }  // target: var | field | index; valueTy = slot type (stamped by inferencer)
+  | { k: 'assign'; target: Expr; value: Expr; valueTy?: Ty | null; declTy?: Ty | null }  // valueTy = slot type (inferencer); declTy = `self.f: T = v` annotation (py frontend)
   | { k: 'expr'; e: Expr }
   | { k: 'return'; v: Expr | null }
   | { k: 'if'; cond: Expr; then: Stmt[]; elifs: { cond: Expr; body: Stmt[] }[]; els: Stmt[] | null }

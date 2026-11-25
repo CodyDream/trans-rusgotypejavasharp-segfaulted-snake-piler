@@ -235,14 +235,18 @@ def stmt(node, ctx, scope):
     ln = line_of(node)
 
     if isinstance(node, ast.AnnAssign):
-        if not isinstance(node.target, ast.Name):
-            raise Unsupported("annotated assignment target must be a name", ln)
         ty = ann_str(node.annotation)
         if node.value is None:
             raise Unsupported("annotated declaration without value not supported in v1 "
                               "(write `x: T = ...`)", ln)
-        scope.declare(node.target.id)
-        return {"k": "vardecl", "name": node.target.id, "ty": ty, "init": exp(node.value, ctx)}
+        if isinstance(node.target, ast.Name):
+            scope.declare(node.target.id)
+            return {"k": "vardecl", "name": node.target.id, "ty": ty, "init": exp(node.value, ctx)}
+        if isinstance(node.target, ast.Attribute):
+            # `self.field: T = value` — declare the field's type alongside its init
+            return {"k": "assign", "target": target_of(node.target, ctx),
+                    "value": exp(node.value, ctx), "declTy": ty}
+        raise Unsupported("annotated assignment target must be a name or self.attr", ln)
 
     if isinstance(node, ast.Assign):
         if len(node.targets) != 1:

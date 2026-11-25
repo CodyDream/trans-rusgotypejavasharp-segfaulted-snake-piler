@@ -161,12 +161,20 @@ function walkStmt(s: Stmt, ctx: Ctx): void {
         if (info.ty != null) fillLiteralTys(s.value, info.ty, ctx);
         s.valueTy = info.ty;   // stamped: slot type for slot-copy emission
       } else if (s.target.k === 'field' && s.target.obj.k === 'this') {
-        const ft = classFieldTy(ctx, s.target.name);
-        if (ft == null && vt != null) setClassFieldTy(ctx, s.target.name, vt);
-        else if (ft != null && vt != null && !compat(ft, vt)) {
-          err(`${ctx.where}: assigning ${tyShow(vt)} to field '${s.target.name}' of type ${tyShow(ft)}`, ctx.where);
+        const dt = s.declTy ?? null;   // `self.f: T = v` — annotation declares the field type
+        let ft = classFieldTy(ctx, s.target.name);
+        if (ft == null && dt != null) {
+          setClassFieldTy(ctx, s.target.name, dt);
+          ft = dt;
+        } else if (dt != null && ft != null && !compat(ft, dt)) {
+          err(`${ctx.where}: field '${s.target.name}' annotated ${tyShow(dt)} but already typed ${tyShow(ft)}`, ctx.where);
         }
-        s.valueTy = ft ?? vt;   // stamped: slot type for slot-copy emission
+        if (ft != null) fillLiteralTys(s.value, ft, ctx);
+        const vt2 = exprTy(s.value, ctx);   // re-type after literal fill (empty list/dict literals)
+        if (ft != null && vt2 != null && !compat(ft, vt2)) {
+          err(`${ctx.where}: assigning ${tyShow(vt2)} to field '${s.target.name}' of type ${tyShow(ft)}`, ctx.where);
+        }
+        s.valueTy = ft ?? vt2;   // stamped: slot type for slot-copy emission
       } else if (s.target.k === 'index') {
         const ot = exprTy(s.target.obj, ctx);
         exprTy(s.target, ctx);   // stamps objTy on the index node (backend dispatch)

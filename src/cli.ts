@@ -19,6 +19,8 @@ import { parseTsFile } from './frontends/ts/index.ts';
 import { emitTs } from './backends/ts/index.ts';
 import { emitJava } from './backends/java/index.ts';
 import { emitCs } from './backends/cs/index.ts';
+import { emitRs } from './backends/rs/index.ts';
+import { linkModules } from './link.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
 import { TranspileError } from './ir/types.ts';
@@ -41,6 +43,7 @@ const BACKENDS: Record<string, (m: Module) => string> = {
   ts: emitTs,
   java: emitJava,
   cs: emitCs,
+  rust: emitRs,
 };
 
 function langOf(path: string): string {
@@ -100,6 +103,7 @@ function usage(): string {
     '  infer <file>             parse, infer types, print the typed IR',
     '  norm <file>              parse, infer, print normalized IR (diff form)',
     "  trans <a->b> <file>      translate one edge",
+    '  link <out> <libs...> <entry>  merge multi-language modules into ONE program',
     '',
     '  chain / roundtrip / run  planned — not built yet (loud error)',
   ].join('\n');
@@ -156,6 +160,24 @@ function main(argv: string[]): number {
         );
       }
       console.log(be(typed));
+      return 0;
+    }
+    case 'link': {
+      // usage: link <outFile> <lib1> [<lib2> ...] <entry> — the LAST file is the entry
+      const [outFile, ...files] = rest;
+      if (outFile == null || files.length === 0) {
+        throw new TranspileError("usage: ouro link <out.rs> <lib1.py> [<lib2.ts> ...] <entry>", 'cli');
+      }
+      const mods = files.map(f => load(f));
+      const merged = linkModules(mods[mods.length - 1], mods.slice(0, -1));
+      const be = BACKENDS[langOf(outFile)];
+      if (be == null) {
+        throw new TranspileError(
+          `no backend for '${langOf(outFile)}' yet (built: ${Object.keys(BACKENDS).join(', ') || 'none'})`,
+          'cli',
+        );
+      }
+      console.log(be(merged));
       return 0;
     }
     case 'chain':
