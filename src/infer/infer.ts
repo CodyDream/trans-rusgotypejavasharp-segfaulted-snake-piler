@@ -159,16 +159,19 @@ function walkStmt(s: Stmt, ctx: Ctx): void {
           err(`${ctx.where}: assigning ${tyShow(vt)} to '${s.target.name}' of type ${tyShow(info.ty)}`, ctx.where);
         }
         if (info.ty != null) fillLiteralTys(s.value, info.ty, ctx);
+        s.valueTy = info.ty;   // stamped: slot type for slot-copy emission
       } else if (s.target.k === 'field' && s.target.obj.k === 'this') {
         const ft = classFieldTy(ctx, s.target.name);
         if (ft == null && vt != null) setClassFieldTy(ctx, s.target.name, vt);
         else if (ft != null && vt != null && !compat(ft, vt)) {
           err(`${ctx.where}: assigning ${tyShow(vt)} to field '${s.target.name}' of type ${tyShow(ft)}`, ctx.where);
         }
+        s.valueTy = ft ?? vt;   // stamped: slot type for slot-copy emission
       } else if (s.target.k === 'index') {
         const ot = exprTy(s.target.obj, ctx);
         exprTy(s.target, ctx);   // stamps objTy on the index node (backend dispatch)
         exprTy(s.value, ctx);
+        s.valueTy = ot?.k === 'list' ? ot.elem : ot?.k === 'map' ? ot.val : null;   // stamped: slot type
         if (ot != null && vt != null) {
           if (ot.k === 'list' && !compat(ot.elem, vt)) {
             err(`${ctx.where}: list holds ${tyShow(ot.elem)}, assigned ${tyShow(vt)}`, ctx.where);
@@ -382,6 +385,7 @@ function binTy(e: Extract<Expr, { k: 'bin' }>, ctx: Ctx): Ty | null {
     const lt = exprTy(e.l, ctx);
     const rt = exprTy(e.r, ctx);
     if (op === 'in' || op === 'notin') {
+      if (rt != null) e.rty = rt;   // stamped: backend dispatches string/list/map membership on the container type
       if (lt != null && rt != null) {
         if (rt.k === 'string' && lt.k !== 'string') err(`${ctx.where}: 'in' on string needs string operand`, ctx.where);
         if (rt.k === 'list' && !compat(rt.elem, lt)) err(`${ctx.where}: 'in' list holds ${tyShow(rt.elem)}, tested ${tyShow(lt)}`, ctx.where);
@@ -420,6 +424,7 @@ function binTy(e: Extract<Expr, { k: 'bin' }>, ctx: Ctx): Ty | null {
 
 function callTy(e: Extract<Expr, { k: 'call' }>, ctx: Ctx): Ty | null {
   const argTys = e.args.map(a => exprTy(a, ctx));
+  e.argTys = argTys;   // stamped: backends that copy slot values (rust) read the slot types
   if (e.name === 'len') {
     if (argTys[0] != null && argTys[0].k !== 'string' && argTys[0].k !== 'list' && argTys[0].k !== 'map') {
       err(`${ctx.where}: len() needs string/list/map, got ${tyShow(argTys[0])}`, ctx.where);
@@ -450,6 +455,7 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
   const argTys = e.args.map(a => exprTy(a, ctx));
   if (ot == null) return null;
   e.objTy = ot;   // stamped for backend dispatch (container methods vs class methods)
+  e.argTys = argTys;   // stamped: slot-copy emission pairs argTys[i] with args[i]
 
   // canonicalize the neutral member name the TS backend emits for both
   // list.index and string.find — IR always carries the canonical name
@@ -483,6 +489,7 @@ function methodTy(e: Extract<Expr, { k: 'method' }>, ctx: Ctx): Ty | null {
         const listExpr = e.obj;
         e.obj = e.args[0];
         e.args = [listExpr];
+        e.argTys = [ot];   // args were just reordered (sep.join(xs)) — restamp to match
         return TY_STRING;
       default: err(`${ctx.where}: unsupported list method '.${e.name}()' (v1: append, pop, index, sort, reverse, clear, join)`, ctx.where);
     }

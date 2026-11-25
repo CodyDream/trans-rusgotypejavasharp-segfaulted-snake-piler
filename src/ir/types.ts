@@ -82,10 +82,10 @@ export type Expr =
   | { k: 'null' }
   | { k: 'var'; name: string }
   | { k: 'this' }
-  | { k: 'bin'; op: BinOp; l: Expr; r: Expr }
+  | { k: 'bin'; op: BinOp; l: Expr; r: Expr; rty?: Ty }      // rty stamped by inferencer ('in' operand dispatch)
   | { k: 'un'; op: UnOp; e: Expr }
-  | { k: 'call'; name: string; args: Expr[] }               // free fn / conversion / len()
-  | { k: 'method'; obj: Expr; name: string; args: Expr[]; objTy?: Ty }  // objTy stamped by inferencer
+  | { k: 'call'; name: string; args: Expr[]; argTys?: (Ty | null)[] }       // argTys stamped by inferencer (slot-copy emission)
+  | { k: 'method'; obj: Expr; name: string; args: Expr[]; objTy?: Ty; argTys?: (Ty | null)[] }  // stamped by inferencer
   | { k: 'field'; obj: Expr; name: string }
   | { k: 'index'; obj: Expr; idx: Expr; objTy?: Ty }        // objTy stamped by inferencer: list [] vs map helper
   | { k: 'list'; elems: Expr[]; elemTy?: Ty }
@@ -99,7 +99,7 @@ export type Expr =
 
 export type Stmt =
   | { k: 'vardecl'; name: string; ty: Ty | null; init: Expr }
-  | { k: 'assign'; target: Expr; value: Expr }              // target: var | field | index
+  | { k: 'assign'; target: Expr; value: Expr; valueTy?: Ty | null }  // target: var | field | index; valueTy = slot type (stamped by inferencer)
   | { k: 'expr'; e: Expr }
   | { k: 'return'; v: Expr | null }
   | { k: 'if'; cond: Expr; then: Stmt[]; elifs: { cond: Expr; body: Stmt[] }[]; els: Stmt[] | null }
