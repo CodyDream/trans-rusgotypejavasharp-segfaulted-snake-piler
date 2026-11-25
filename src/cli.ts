@@ -21,6 +21,7 @@ import { emitTs } from './backends/ts/index.ts';
 import { emitJava } from './backends/java/index.ts';
 import { emitCs } from './backends/cs/index.ts';
 import { emitRs } from './backends/rs/index.ts';
+import { emitGo } from './backends/go/index.ts';
 import { linkModules } from './link.ts';
 import { inferModule } from './infer/infer.ts';
 import { dumpModule, dumpNormalized } from './ir/show.ts';
@@ -46,6 +47,7 @@ const BACKENDS: Record<string, (m: Module) => string> = {
   java: emitJava,
   cs: emitCs,
   rust: emitRs,
+  go: emitGo,
 };
 
 function langOf(path: string): string {
