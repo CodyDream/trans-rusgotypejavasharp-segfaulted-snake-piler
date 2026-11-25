@@ -231,8 +231,26 @@ func print(args ...any) {
 
 func pyconcat(a any, b any) string { return pystr(a) + pystr(b) }
 
-// pyeq: Python's == — deep for lists/dicts, native for scalars.
-func pyeq(a any, b any) bool { return reflect.DeepEqual(a, b) }
+// pyeq: Python's == — deep for lists/dicts, native for scalars. Untyped Go
+// int constants box to plain int while IR ints are int64, so normalize first.
+func pyeq(a any, b any) bool {
+	if ai, ok := asInt64(a); ok {
+		if bi, ok2 := asInt64(b); ok2 {
+			return ai == bi
+		}
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func asInt64(v any) (int64, bool) {
+	switch x := v.(type) {
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	}
+	return 0, false
+}
 
 // ---- arithmetic with Python floor semantics ---------------------------------
 
@@ -662,7 +680,8 @@ function forrangeHead(s: Extract<Stmt, { k: 'forrange' }>): string {
   let delta = s.step;
   if (delta.k === 'un') delta = delta.e;
   if (delta.k !== 'int' || delta.v === 0) err('forrange step must be a nonzero int literal in the Go backend');
-  return `for ${v} := ${start}; ${v} ${cmp} ${stop}; ${v} ${cmp === '<' ? '+' : '-'}= ${delta.v} {`;
+  // int64(start): an untyped literal would infer Go `int`, not int64
+  return `for ${v} := int64(${start}); ${v} ${cmp} ${stop}; ${v} ${cmp === '<' ? '+' : '-'}= ${delta.v} {`;
 }
 
 function foreachHead(s: Extract<Stmt, { k: 'foreach' }>): string {
@@ -699,6 +718,7 @@ function collectReads(body: Stmt[], acc = new Set<string>()): Set<string> {
       case 'assign': walkExpr(s.target); walkExpr(s.value); return;
       case 'expr': walkExpr(s.e); return;
       case 'return': if (s.v) walkExpr(s.v); return;
+      case 'print': s.args.forEach(walkExpr); return;
       case 'if': walkExpr(s.cond); s.then.forEach(walkStmt); s.elifs.forEach(el => { walkExpr(el.cond); el.body.forEach(walkStmt); }); if (s.els) s.els.forEach(walkStmt); return;
       case 'while': walkExpr(s.cond); s.body.forEach(walkStmt); return;
       case 'forrange': walkExpr(s.start); walkExpr(s.stop); walkExpr(s.step); s.body.forEach(walkStmt); return;
@@ -899,7 +919,7 @@ function emitClass(c: ClassDecl, out: string[], clsName: string): void {
     scopes = [new Set()];
     for (const p of ctorParams) declareScope(p.name);
     emitBody(c.ctor.body, out, 1);
-    ctxThis = 'self';
+    ctxThis = 'x';
   }
   out.push(`\treturn obj`);
   out.push(`}`, '');

@@ -456,6 +456,29 @@ function callTy(e: Extract<Expr, { k: 'call' }>, ctx: Ctx): Ty | null {
   if (e.name === 'bool') err(`${ctx.where}: bool() unsupported in v1`, ctx.where);
   const f = ctx.funs.get(e.name);
   if (f == null) {
+    // a call whose name is a class IS construction (C++/Python spell it so —
+    // the parser may not know cross-module classes, the inferencer does)
+    const cls = ctx.classes.get(e.name);
+    if (cls != null) {
+      const ctorParams = cls.ctor?.params ?? [];
+      if (e.args.length !== ctorParams.length) {
+        err(`${ctx.where}: '${e.name}' constructor takes ${ctorParams.length} argument(s), got ${e.args.length}`, ctx.where);
+      }
+      for (let i = 0; i < ctorParams.length; i++) {
+        const pt = ctorParams[i].ty;
+        const at = argTys[i];
+        if (pt != null && at != null && !compat(pt, at)) {
+          err(`${ctx.where}: constructor argument ${i + 1} of '${e.name}' is ${tyShow(at)}, expected ${tyShow(pt)}`, ctx.where);
+        }
+        if (pt != null) fillLiteralTys(e.args[i], pt, ctx);
+      }
+      // rewrite the node: every backend dispatches on 'new'
+      const node = e as unknown as { k: string; cls: string; argTys?: unknown };
+      node.k = 'new';
+      node.cls = e.name;
+      delete node.argTys;
+      return { k: 'class', name: e.name };
+    }
     err(`${ctx.where}: unknown function '${e.name}'`, ctx.where);
   }
   // light arg compat checks

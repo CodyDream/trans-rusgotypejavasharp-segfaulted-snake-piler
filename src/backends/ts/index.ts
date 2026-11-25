@@ -337,7 +337,11 @@ export function emitTs(m: Module): string {
       out.push('// --- main (module-level statements) ---');
       emitBody(main.body, out, 0);
     } else {
-      emitFun(main, out);   // explicit def main(): emitted, never called (faithful to Python)
+      emitFun(main, out);
+      // py/ts spell main as a plain declaration (python3 runs it only when
+      // called); languages whose runtime treats main as the entry (C++ ...)
+      // must actually run here
+      if (m.sourceLang !== 'py' && m.sourceLang !== 'ts') out.push('main();');
     }
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n') + '\n';

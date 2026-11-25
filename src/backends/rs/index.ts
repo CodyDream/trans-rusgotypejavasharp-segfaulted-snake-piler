@@ -480,7 +480,10 @@ function emitStmt(s: Stmt, out: string[], ind: number): void {
         if (t.objTy?.k === 'map') {
           out.push(`${pad}${emitExpr(t.obj)}.set(&${emitExpr(t.idx)}, ${slotVal(s.value, s.valueTy ?? null)});`);
         } else {
-          out.push(`${pad}${emitExpr(t.obj)}[(${emitExpr(t.idx)}) as usize] = ${slotVal(s.value, s.valueTy ?? null)};`);
+          // nested targets must index RAW: emitExpr(index) clones the element
+          // for reads, and `cells[j].clone()[i] = v` would mutate a lost temp
+          const raw = t.obj.k === 'index' ? emitIndexTargetRaw(t.obj) : emitExpr(t.obj);
+          out.push(`${pad}${raw}[(${emitExpr(t.idx)}) as usize] = ${slotVal(s.value, s.valueTy ?? null)};`);
         }
       } else err('unsupported assignment target reached the backend (inferencer bug)');
       break;
@@ -536,6 +539,15 @@ function emitStmt(s: Stmt, out: string[], ind: number): void {
 
 function emitBody(body: Stmt[], out: string[], ind: number): void {
   for (const s of body) emitStmt(s, out, ind);
+}
+
+/**
+ * Assignment-target form of an index chain: no `.clone()` on any level
+ * (`cells[j][i] = v` must mutate the stored row, not a temporary copy).
+ */
+function emitIndexTargetRaw(e: Extract<Expr, { k: 'index' }>): string {
+  const obj = e.obj.k === 'index' ? emitIndexTargetRaw(e.obj) : emitExpr(e.obj);
+  return `${obj}[(${emitExpr(e.idx)}) as usize]`;
 }
 
 // ---------------------------------------------------------------------------
