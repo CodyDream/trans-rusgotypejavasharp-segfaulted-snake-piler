@@ -167,7 +167,7 @@ function emitExpr(e: Expr): string {
         : `${wrap(e.obj)}[${emitExpr(e.idx)}]`;
     case 'list': return `[${e.elems.map(emitExpr).join(', ')}]`;
     case 'map':
-      return `new Map<string, ${emitTy(e.valTy)}>([${
+      return `new Map<string, ${emitTy(e.valTy ?? null)}>([${
         e.entries.map(en => `[${JSON.stringify(en.key)}, ${emitExpr(en.val)}]`).join(', ')
       }])`;
     case 'new': return `new ${e.cls}(${e.args.map(emitExpr).join(', ')})`;
