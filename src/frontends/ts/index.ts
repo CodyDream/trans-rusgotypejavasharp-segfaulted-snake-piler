@@ -755,6 +755,8 @@ export function parseTsFile(filePath: string): Module {
   }
   const name = basename(filePath).replace(/\.[^.]+$/, '');
   const m: Module = { name, sourceLang: 'ts', items, implicitMain: mainBody.length > 0 };
-  inferModule(m);   // fill remaining nulls (literal lets, foreach) + validate
+  // NOTE: inference happens in the CLI (loadTyped/trans/link), never here —
+  // a module may reference classes/functions defined in ANOTHER module that
+  // only type-check once the linker has merged them.
   return m;
 }

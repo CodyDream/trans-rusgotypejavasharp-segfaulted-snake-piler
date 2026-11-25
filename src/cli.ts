@@ -69,8 +69,7 @@ function load(path: string): Module {
 }
 
 function loadTyped(path: string): Module {
-  const m = load(path);
-  return m.sourceLang === 'py' ? inferModule(m) : m;
+  return inferModule(load(path));   // both frontends need it: py for typing, ts for stamps
 }
 
 function parseEdge(spec: string): { src: string; dst: string } {
@@ -151,7 +150,7 @@ function main(argv: string[]): number {
           'cli',
         );
       }
-      const typed = m.sourceLang === 'py' ? inferModule(m) : m;
+      const typed = inferModule(m);
       const be = BACKENDS[dst];
       if (be == null) {
         throw new TranspileError(

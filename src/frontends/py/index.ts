@@ -88,7 +88,10 @@ function convStmt(j: any): Stmt {
   if (!j || typeof j.k !== 'string') fail('statement missing kind tag');
   switch (j.k) {
     case 'vardecl': return { k: 'vardecl', name: j.name, ty: parseTy(j.ty), init: convExpr(j.init) };
-    case 'assign': return { k: 'assign', target: convExpr(j.target), value: convExpr(j.value) };
+    case 'assign': return {
+      k: 'assign', target: convExpr(j.target), value: convExpr(j.value),
+      declTy: j.declTy != null ? parseTy(j.declTy) : undefined,   // `self.f: T = v`
+    };
     case 'expr': return { k: 'expr', e: convExpr(j.e) };
     case 'return': return { k: 'return', v: j.v == null ? null : convExpr(j.v) };
     case 'if': return {

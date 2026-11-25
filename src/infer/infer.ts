@@ -163,10 +163,13 @@ function walkStmt(s: Stmt, ctx: Ctx): void {
       } else if (s.target.k === 'field' && s.target.obj.k === 'this') {
         const dt = s.declTy ?? null;   // `self.f: T = v` — annotation declares the field type
         let ft = classFieldTy(ctx, s.target.name);
-        if (ft == null && dt != null) {
-          setClassFieldTy(ctx, s.target.name, dt);
-          ft = dt;
-        } else if (dt != null && ft != null && !compat(ft, dt)) {
+        if (ft == null) {
+          const candidate = dt ?? exprTy(s.value, ctx);   // discovery: annotation first, then the value's type
+          if (candidate != null && candidate.k !== 'any') {
+            setClassFieldTy(ctx, s.target.name, candidate);
+            ft = candidate;
+          }
+        } else if (dt != null && !compat(ft, dt)) {
           err(`${ctx.where}: field '${s.target.name}' annotated ${tyShow(dt)} but already typed ${tyShow(ft)}`, ctx.where);
         }
         if (ft != null) fillLiteralTys(s.value, ft, ctx);

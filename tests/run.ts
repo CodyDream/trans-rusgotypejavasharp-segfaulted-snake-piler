@@ -50,7 +50,7 @@ function check(name: string, fn: () => void): void {
 // -- helpers ----------------------------------------------------------------
 
 function parseTyped(lang: 'py' | 'ts', path: string): string {
-  const m = lang === 'py' ? inferModule(parsePyFile(path)) : parseTsFile(path);
+  const m = inferModule(lang === 'py' ? parsePyFile(path) : parseTsFile(path));
   return dumpNormalized(m);
 }
 
@@ -217,7 +217,7 @@ check('edge py->ts: emitted TS re-parses to identical normalized IR', () => {
 });
 
 check('edge ts->ts: self-edge re-parse identity', () => {
-  const m = parseTsFile(SMOKE_TS);
+  const m = inferModule(parseTsFile(SMOKE_TS));   // parse no longer infers (linker requirement)
   const dir = mkdtempSync(join(tmpdir(), 'ouro-edge-'));
   const tsPath = join(dir, 'smoke_self.ts');
   writeFileSync(tsPath, emitTs(m));
