@@ -398,9 +398,9 @@ function emitFun(f: FunDecl, out: string[], clsName: string): void {
   const params = f.params.map(p => `${emitTy(p.ty)} ${ident(p.name)}`).join(', ');
   if (f.name === 'main' && f.params.length === 0) {
     // an explicit def main() becomes the entry point (Java needs one to run)
-    out.push(`  public static void main(String[] args) {`);
-    emitBody(f.body, out, 2);
-    out.push('  }', '');
+    out.push(`    public static void main(String[] args) {`);
+    emitBody(f.body, out, 3);
+    out.push('    }', '');
     return;
   }
   if (f.name === 'main') {
@@ -454,10 +454,10 @@ export function emitJava(m: Module): string {
     } else emitFun(item, out, clsName);
   }
   if (!entryDone) {
-    out.push('  public static void main(String[] args) {');
-    if (main) emitBody(main.body, out, 2);
+    out.push('    public static void main(String[] args) {');
+    if (main) emitBody(main.body, out, 3);
     // a module of only declarations runs like an imported Python module: no output
-    out.push('  }');
+    out.push('    }');
   }
   out.push('}', '');
   return out.join('\n');
