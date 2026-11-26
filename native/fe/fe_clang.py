@@ -1,649 +1,714 @@
 #!/usr/bin/env python3
 """
-fe_clang.py — Clang AST -> Ouroboros native IR (JSON).
+fe_clang.py — Clang AST -> Ouroboros native IR (JSON). SIMD-first design.
 
-The front-end for the native pipe: parses the battery TU (which includes the
-REAL Jolt math headers) with libclang and lowers the supported subset to a
-bit-exact language-neutral IR. Everything it cannot lower is loudly reported
-in the unsupported report — never silently dropped.
+Parses the battery TU (which includes the REAL Jolt math headers, SSE path)
+with libclang and lowers the supported subset to a bit-exact, language-neutral
+IR. SSE intrinsics (_mm_*) are mapped through an explicit intrinsic table to
+IR simd ops — backends emit native SIMD (C# Vector128, Rust std::arch SSE).
+Everything not lowerable is loudly reported — never silently dropped.
 
-Supported constructs (rung 1: "Jolt scalar math"):
-  - classes w/ anonymous-union storage (flattened: mValue -> mF32/mU32 lanes)
-  - 'Type' alias (Vec3::Type / Vec4::Type / UVec4::Type) -> owner class
-  - ctors (incl. member-init lists), static methods, instance methods
-  - operator overloads (binary/unary/compound/index/friend-scalar-mul)
-  - scalar types f32/i32/u32/bool/void + cstr (literal strings only)
-  - fixed-size lane arrays (float[4], uint32[4]) incl. variable indexing
-  - if / canonical for / while / return / printf (subset: %s %08x %u \n)
-  - ternary, bit ops on u32, hex literals, compound assignment (expanded)
-  - bit reinterpretation via union (FBits pattern) and ReinterpretAsInt/Float
-  - out-params via pointer (StoreFloat4(&f4)) -> ref args
-  - intrinsics: abs, isnan, signbit, sqrt(f32), ctz(u32), min/max -> select
+IR types: f32 i32 u32 bool void cstr fbits v128f v128i cls{name} ref{to,mut}
 
 Usage:
-  PYTHONPATH=tools/pylibs python3 fe_clang.py <battery.cpp> <include-dir> <out-ir.json> <out-report.txt>
+  PYTHONPATH=tools/pylibs python3 fe_clang.py <battery.cpp> <incdir> <out-ir.json> <out-report.txt>
 """
 
 import sys
+import os
 import json
 from clang import cindex
 
 # ---------------------------------------------------------------------------
-# IR type helpers
+# IR types
 # ---------------------------------------------------------------------------
 
-def t_prim(name):
-    return {"k": name}          # f32 f64 i32 u32 bool void cstr
+def t(name):                       # primitive / lane / special type
+    return {"k": name}
 
 def t_cls(name):
     return {"k": "cls", "name": name}
 
-def t_arr(elem, n):
-    return {"k": "arr", "elem": elem, "n": n}
-
 def t_ref(to, mut):
     return {"k": "ref", "to": to, "mut": mut}
 
-def ty_show(t):
-    k = t["k"]
-    if k == "cls": return t["name"]
-    if k == "arr": return f"{ty_show(t['elem'])}[{t['n']}]"
-    if k == "ref": return ("mut " if t["mut"] else "const ") + ty_show(t["to"])
+def ty_show(ty):
+    k = ty["k"]
+    if k == "cls": return ty["name"]
+    if k == "ref": return ("mut " if ty["mut"] else "const ") + ty_show(ty["to"])
     return k
 
-def ty_eq(a, b):
-    if a["k"] != b["k"]: return False
-    if a["k"] == "cls": return a["name"] == b["name"]
-    if a["k"] == "arr": return a["n"] == b["n"] and ty_eq(a["elem"], b["elem"])
-    if a["k"] == "ref": return a["mut"] == b["mut"] and ty_eq(a["to"], b["to"])
-    return True
-
-PRIMS = {"float": "f32", "double": "f64", "int": "i32", "unsigned int": "u32",
-         "uint32_t": "u32", "uint": "u32", "bool": "bool", "void": "void",
-         "unsigned long": "u64", "long": "i64", "unsigned char": "u8",
-         "signed char": "i8", "short": "i16", "unsigned short": "u16",
-         "long long": "i64", "unsigned long long": "u64"}
-
-CLASS_ALIASES = {"Vec4": "Vec4", "Vec3": "Vec3", "UVec4": "UVec4",
-                 "Float3": "Float3", "Float4": "Float4"}
-# Jolt's per-class 'Type' (SIMD lane struct) aliases to the owner class under
-# the union-flatten strategy: Vec3::Type = Vec4::Type = struct{float mData[4]}.
-TYPE_ALIAS = {"Vec3": "Vec3", "Vec4": "Vec4", "UVec4": "UVec4"}
-
 TARGET_CLASSES = {"Vec4", "Vec3", "UVec4", "Float3", "Float4"}
+
+# Vec3::Type = Vec4::Type = __m128 ; UVec4::Type = __m128i  (SSE path)
+TYPE_ALIAS = {"Vec3": "v128f", "Vec4": "v128f", "UVec4": "v128i"}
+
+# ---------------------------------------------------------------------------
+# SSE intrinsic -> IR simd op mapping table
+# ---------------------------------------------------------------------------
+
+SSE_TABLE = {
+    "_mm_add_ps":      ("fadd", 2, "v128f"),
+    "_mm_sub_ps":      ("fsub", 2, "v128f"),
+    "_mm_mul_ps":      ("fmul", 2, "v128f"),
+    "_mm_div_ps":      ("fdiv", 2, "v128f"),
+    "_mm_min_ps":      ("fmin", 2, "v128f"),
+    "_mm_max_ps":      ("fmax", 2, "v128f"),
+    "_mm_and_ps":      ("fbitand", 2, "v128f"),
+    "_mm_or_ps":       ("fbitor", 2, "v128f"),
+    "_mm_xor_ps":      ("fbitxor", 2, "v128f"),
+    "_mm_andnot_ps":   ("fbitandnot", 2, "v128f"),
+    "_mm_set1_ps":     ("splatf", 1, "v128f"),
+    "_mm_setzero_ps":  ("zerof", 0, "v128f"),
+    "_mm_set_ss":      ("setss", 1, "v128f"),
+    "_mm_load_ss":     ("load_ss", 1, "v128f"),
+    "_mm_loadu_ps":    ("load", 1, "v128f"),
+    "_mm_load_ps":     ("load", 1, "v128f"),
+    "_mm_storeu_ps":   ("store", 2, "void"),
+    "_mm_unpacklo_ps": ("unpacklo", 2, "v128f"),
+    "_mm_unpackhi_ps": ("unpackhi", 2, "v128f"),
+    "_mm_shuffle_ps":  ("shuffle", 3, "v128f"),
+    "_mm_movehdup_ps": ("movehdup", 1, "v128f"),
+    "_mm_moveldup_ps": ("moveldup", 1, "v128f"),
+    "_mm_movehl_ps":   ("movehl", 2, "v128f"),
+    "_mm_hadd_ps":     ("hadd", 2, "v128f"),
+    "_mm_cvtss_f32":   ("cvtss", 1, "f32"),
+    "_mm_cvttps_epi32": ("cvttps", 1, "v128i"),
+    "_mm_sqrt_ps":     ("sqrtf4", 1, "v128f"),
+    "_mm_cvtepi32_ps": ("i2f", 1, "v128f"),
+    "_mm_shuffle_epi32": ("shufflei", 2, "v128i"),
+    "_mm_srai_epi32":  ("srai", 2, "v128i"),
+    "_mm_mullo_epi32": ("imullo", 2, "v128i"),
+    "_mm_store_ss":    ("store_ss", 2, "void"),
+    "_mm_movelh_ps":   ("movelh", 2, "v128f"),
+    "_mm_sqrt_ss":     ("sqrtss", 1, "v128f"),
+    "_mm_add_ss":      ("addss", 2, "v128f"),
+    "_mm_sub_ss":      ("subss", 2, "v128f"),
+    "_mm_mul_ss":      ("mulss", 2, "v128f"),
+    "_mm_div_ss":      ("divss", 2, "v128f"),
+    "_mm_cmpunord_ps": ("fcmp_unord", 2, "v128f"),
+    "_mm_cmpeq_ps":    ("fcmp_eq", 2, "v128f"),
+    "_mm_cmpneq_ps":   ("fcmp_ne", 2, "v128f"),
+    "_mm_cmplt_ps":    ("fcmp_lt", 2, "v128f"),
+    "_mm_cmpgt_ps":    ("fcmp_gt", 2, "v128f"),
+    "_mm_cmple_ps":    ("fcmp_le", 2, "v128f"),
+    "_mm_cmpge_ps":    ("fcmp_ge", 2, "v128f"),
+    "_mm_castps_si128": ("bitcast_i", 1, "v128i"),
+    "_mm_castsi128_ps": ("bitcast_f", 1, "v128f"),
+    "_mm_movemask_ps": ("movemask", 1, "i32"),
+    "_mm_insert_ps":   ("insert", 3, "v128f"),
+    "_mm_extract_ps":  ("extract", 2, "i32"),
+    "_mm_blendv_ps":   ("blendv", 3, "v128f"),
+    "_mm_add_epi32":   ("iadd", 2, "v128i"),
+    "_mm_sub_epi32":   ("isub", 2, "v128i"),
+    "_mm_min_epi32":   ("imin", 2, "v128i"),
+    "_mm_max_epi32":   ("imax", 2, "v128i"),
+    "_mm_and_si128":   ("ibitand", 2, "v128i"),
+    "_mm_or_si128":    ("ibitor", 2, "v128i"),
+    "_mm_xor_si128":   ("ibitxor", 2, "v128i"),
+    "_mm_andnot_si128": ("ibitandnot", 2, "v128i"),
+    "_mm_set1_epi32":  ("splatu", 1, "v128i"),
+    "_mm_setzero_si128": ("zeroi", 0, "v128i"),
+    "_mm_set_epi32":   ("set4u", 4, "v128i"),
+    "_mm_setr_epi32":  ("set4u", 4, "v128i"),
+    "_mm_setr_ps":     ("set4", 4, "v128f"),
+    "_mm_set_ps":      ("set4", 4, "v128f"),
+    "_mm_cmpeq_epi32": ("icmp_eq", 2, "v128i"),
+    "_mm_cmpgt_epi32": ("icmp_gt", 2, "v128i"),
+    "_mm_cmplt_epi32": ("icmp_lt", 2, "v128i"),
+    "_mm_slli_epi32":  ("slli", 2, "v128i"),
+    "_mm_srli_epi32":  ("srli", 2, "v128i"),
+    "_mm_cvtsi128_si32": ("cvt32", 1, "i32"),
+}
+
+OPMAP = {"operator+": "op_add", "operator-": "op_sub", "operator*": "op_mul",
+         "operator/": "op_div", "operator==": "op_eq", "operator!=": "op_ne",
+         "operator[]": "op_index", "operator+=": "op_iadd", "operator-=": "op_isub",
+         "operator*=": "op_imul", "operator/=": "op_idiv", "operator=": "op_assign"}
+
+GXX_INCLUDES = [
+    "/usr/include/c++/14",
+    "/usr/include/x86_64-linux-gnu/c++/14",
+    "/usr/include/c++/14/backward",
+    "/usr/lib/gcc/x86_64-linux-gnu/14/include",
+    "/usr/local/include",
+    "/usr/include/x86_64-linux-gnu",
+    "/usr/include",
+]
 
 
 class Frontend:
     def __init__(self, source, incdir):
-        self.unsupported = []          # (symbol, reason)
-        self.skipped_methods = set()   # fully-qualified names we refused
+        self.unsupported = []
+        self.reported = set()
         self.index = cindex.Index.create()
-        args = ["-std=c++17", "-DJPH_PLATFORM_WASM", "-DNDEBUG",
-                "-ffp-contract=off", f"-I{incdir}"]
+        shim = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sse_shim.h")
+        args = ["-std=c++17", "-DNDEBUG", "-ffp-contract=off", f"-I{incdir}",
+                "-include", shim]
+        for inc in GXX_INCLUDES:
+            args.append(f"-isystem{inc}")
         self.tu = self.index.parse(source, args=args)
-        self.source_file = source
+        self.source_name = source.split("/")[-1]
         self.diag_fail = any(d.severity >= cindex.Diagnostic.Error for d in self.tu.diagnostics)
-        self.classes = {}              # name -> {"fields": [...], "methods": [...]}
+        self.classes = {}
         self.funs = []
+        self.local_types = {}
 
-    def report_unsupported(self, sym, reason):
-        key = sym
-        if key not in self.skipped_methods:
-            self.skipped_methods.add(key)
+    def report(self, sym, reason):
+        if sym not in self.reported:
+            self.reported.add(sym)
             self.unsupported.append({"symbol": sym, "reason": reason})
 
-    def in_source(self, cursor):
-        f = cursor.location.file
-        return f is not None and f.name.endswith(self.source_file.split("/")[-1])
+    def in_source(self, cur):
+        f = cur.location.file
+        return f is not None and os.path.basename(f.name) == self.source_name
 
     # ------------------------------------------------------------------ types
-    def canon_type(self, ct):
-        """clang Type -> IR type (canonical form, may return None)."""
+    def canon(self, ct):
         if ct is None:
             return None
-        # strip typedefs (Vec4Arg etc.) — libclang: get_canonical too aggressive
-        # (maps Type->struct), so walk typedef chain manually.
-        t = ct
-        while t.kind == cindex.TypeKind.TYPEDEF:
-            t = t.get_declaration().underlying_typedef_type
-        # strip references / pointers
-        if t.kind == cindex.TypeKind.LVALUEREFERENCE:
-            inner = self.canon_type(t.get_pointee())
-            if inner is None: return None
-            return t_ref(inner, False)
-        if t.kind == cindex.TypeKind.RVALUEREFERENCE:
-            inner = self.canon_type(t.get_pointee())
-            if inner is None: return None
-            return t_ref(inner, True)
-        if t.kind == cindex.TypeKind.POINTER:
-            inner = self.canon_type(t.get_pointee())
-            if inner is None: return None
+        ty = ct
+        # resolve typedefs/using-aliases via canonical type (handles Jolt's
+        # 'using uint32 = uint32_t' style aliases)
+        if ty.kind == cindex.TypeKind.TYPEDEF:
+            try:
+                cc = ty.get_canonical()
+                if cc.kind != ty.kind:
+                    return self.canon(cc)
+            except Exception:
+                pass
+        seen = 0
+        while ty.kind == cindex.TypeKind.TYPEDEF and seen < 8:
+            d = ty.get_declaration()
+            if d is None:
+                return None
+            try:
+                ty = d.underlying_typedef_type
+            except Exception:
+                return None
+            seen += 1
+        k = ty.kind
+        if k == cindex.TypeKind.ELABORATED:
+            return self.canon(ty.get_named_type())
+        if k in (cindex.TypeKind.LVALUEREFERENCE, cindex.TypeKind.RVALUEREFERENCE):
+            inner = self.canon(ty.get_pointee())
+            return t_ref(inner, False) if inner else None
+        if k == cindex.TypeKind.POINTER:
+            inner = self.canon(ty.get_pointee())
+            if inner is None:
+                return None
             if inner["k"] == "cstr":
-                return t_prim("cstr")
+                return t("cstr")
             return t_ref(inner, True)
-        if t.kind == cindex.TypeKind.CONSTANTARRAY:
-            n = t.get_array_size()
-            elem = self.canon_type(t.get_array_element_type())
-            if elem is None or n <= 0: return None
-            return t_arr(elem, n)
-        if t.kind == cindex.TypeKind.RECORD:
-            name = t.get_declaration().spelling
-            if name in CLASS_ALIASES:
+        if k == cindex.TypeKind.CONSTANTARRAY:
+            n = ty.get_array_size()
+            elem = self.canon(ty.get_array_element_type())
+            if elem is None or n <= 0:
+                return None
+            return {"k": "arr", "elem": elem, "n": n}
+        if k == cindex.TypeKind.RECORD:
+            d = ty.get_declaration()
+            name = d.spelling or ""
+            if name in TARGET_CLASSES:
                 return t_cls(name)
-            # anonymous struct used as Vec4::Type in scalar path: it appears as
-            # a record whose parent typedef/using is 'Type' inside VecN — clang
-            # spells it like 'Vec4::(anonymous struct at ...)' — treat by context.
-            disp = t.spelling or ""
             return None
-        if t.kind == cindex.TypeKind.ELABORATED:
-            return self.canon_type(t.get_named_type())
-        if t.kind in (cindex.TypeKind.FLOAT,):
-            return t_prim("f32")
-        if t.kind == cindex.TypeKind.DOUBLE:
-            return t_prim("f64")
-        if t.kind in (cindex.TypeKind.INT, cindex.TypeKind.INT128 if hasattr(cindex.TypeKind, 'INT128') else cindex.TypeKind.INT):
-            return t_prim("i32")
-        if t.kind in (cindex.TypeKind.UINT, cindex.TypeKind.ULONG, cindex.TypeKind.ULONGLONG):
-            sp = t.spelling
-            if t.kind == cindex.TypeKind.UINT or "unsigned int" in sp or "uint32" in sp:
-                return t_prim("u32")
-            return t_prim("u64")
-        if t.kind == cindex.TypeKind.BOOL:
-            return t_prim("bool")
-        if t.kind == cindex.TypeKind.VOID:
-            return t_prim("void")
-        if t.kind == cindex.TypeKind.SINT:   # int via canonical
-            return t_prim("i32")
+        if k == cindex.TypeKind.FLOAT:
+            return t("f32")
+        if k == cindex.TypeKind.DOUBLE:
+            return t("f64")
+        if k == cindex.TypeKind.INT:
+            return t("i32")
+        if k == cindex.TypeKind.UINT:
+            return t("u32")
+        if k == cindex.TypeKind.BOOL:
+            return t("bool")
+        if k == cindex.TypeKind.VOID:
+            return t("void")
         return None
 
-    def param_type(self, ct, cls_ctx=None):
-        """Canonicalize a parameter type; applies 'Type' alias and value-copy
-        rewrite for const refs of small classes."""
-        t = self.canon_type(ct)
-        if t is None:
-            # maybe it's the class-local 'Type' alias
-            sp = ct.spelling or ""
-            decl = ct.get_declaration()
-            if decl is not None:
-                td_name = decl.spelling
-                if td_name == "Type" and cls_ctx in TYPE_ALIAS:
-                    return t_cls(TYPE_ALIAS[cls_ctx])
+    def param_ty(self, ct, cls_ctx):
+        """Parameter canonicalization: Type alias + const-ref -> by value."""
+        d = ct.get_declaration() if ct is not None else None
+        if d is not None and d.spelling == "Type" and cls_ctx in TYPE_ALIAS:
+            return t(TYPE_ALIAS[cls_ctx])
+        ty = self.canon(ct)
+        if ty is None:
             return None
-        # const-ref params of our classes -> by value (read-only use)
-        if t["k"] == "ref" and not t["mut"] and t["to"]["k"] == "cls":
-            return t["to"]
-        if t["k"] == "ref" and not t["mut"] and t["to"]["k"] in ("f32", "f64"):
-            return t["to"]
-        return t
+        if ty["k"] == "ref" and not ty["mut"]:
+            to = ty["to"]
+            if to["k"] == "cls" or to["k"] in ("f32", "f64", "i32", "u32", "cstr"):
+                return to
+        return ty
 
-    # ------------------------------------------------------------------ literals
-    def lit_spelling(self, cursor):
-        toks = list(self.tu.get_tokens(cursor.extent))
+    # ------------------------------------------------------------------ tokens
+    def spelling_of(self, cur):
+        toks = list(cur.get_tokens())
         return toks[0].spelling if toks else ""
 
-    # ------------------------------------------------------------------ exprs
-    def strip(self, c):
-        """Strip implicit/unexposed wrappers, keep ParentPointer? no."""
-        while c is not None and c.kind in (cindex.CursorKind.UNEXPOSED_EXPR,
-                                           cindex.CursorKind.IMPLICIT_CAST_EXPR,
-                                           cindex.CursorKind.CSTYLE_CAST_EXPR if False else cindex.CursorKind.UNEXPOSED_EXPR):
-            kids = [k for k in c.get_children()]
-            if not kids:
-                return c
-            c = kids[0]
-        return c
+    def op_token(self, cur, cands):
+        for tk in cur.get_tokens():
+            if tk.spelling in cands:
+                return tk.spelling
+        return None
 
-    def strip_cast(self, c):
-        """Remove ImplicitCastExpr wrappers (returning inner cursor)."""
-        while c is not None and c.kind in (cindex.CursorKind.IMPLICIT_CAST_EXPR,
-                                           cindex.CursorKind.UNEXPOSED_EXPR):
-            kids = list(c.get_children())
+    # ------------------------------------------------------------------ const eval
+    def const_eval_int(self, cur):
+        cur = self.strip(cur)
+        k = cur.kind
+        if k == cindex.CursorKind.INTEGER_LITERAL:
+            sp = self.spelling_of(cur).lower().rstrip("ul")
+            if sp.startswith("0x"):
+                return int(sp[2:], 16)
+            if sp.startswith("0b"):
+                return int(sp[2:], 2)
+            return int(sp)
+        if k == cindex.CursorKind.UNARY_OPERATOR:
+            kids = list(cur.get_children())
+            toks = [tk.spelling for tk in cur.get_tokens()]
+            if kids:
+                v = self.const_eval_int(kids[0])
+                if v is not None:
+                    return -v if "-" in toks else v
+            return None
+        if k == cindex.CursorKind.BINARY_OPERATOR:
+            op = self.op_token(cur, ("|", "&", "^", "<<", ">>", "+", "-", "*", "/"))
+            kids = list(cur.get_children())
+            if op is None or len(kids) < 2:
+                return None
+            a = self.const_eval_int(kids[0])
+            b = self.const_eval_int(kids[1])
+            if a is None or b is None:
+                return None
+            return {"|": a | b, "&": a & b, "^": a ^ b, "<<": a << b, ">>": a >> b,
+                    "+": a + b, "-": a - b, "*": a * b, "/": a // b}[op]
+        return None
+
+    # ------------------------------------------------------------------ helpers
+    def strip(self, cur):
+        while cur is not None and cur.kind in (cindex.CursorKind.UNEXPOSED_EXPR,
+                                               cindex.CursorKind.PAREN_EXPR):
+            kids = list(cur.get_children())
             if not kids:
                 break
-            c = kids[0]
-        return c
+            cur = kids[0]
+        return cur
 
-    def build_expr(self, c, want=None, cls_ctx=None):
-        """clang cursor -> IR expr. want = expected IR type (for literal stamp)."""
-        kind = c.kind
+    def callee_of(self, cur):
+        """Callee decl + its ref cursor for a CALL_EXPR (clang 18 style).
+        Builtins hide their DECL_REF_EXPR under UNEXPOSED_EXPR wrappers."""
+        for k in cur.get_children():
+            ref = k.referenced
+            if ref is not None and \
+               k.kind in (cindex.CursorKind.DECL_REF_EXPR, cindex.CursorKind.MEMBER_REF_EXPR) and \
+               ref.kind in (cindex.CursorKind.FUNCTION_DECL, cindex.CursorKind.CXX_METHOD,
+                            cindex.CursorKind.FUNCTION_TEMPLATE, cindex.CursorKind.CONSTRUCTOR):
+                return ref, k
+            if k.kind == cindex.CursorKind.UNEXPOSED_EXPR:
+                for k2 in k.get_children():
+                    ref2 = k2.referenced
+                    if ref2 is not None and \
+                       k2.kind in (cindex.CursorKind.DECL_REF_EXPR, cindex.CursorKind.MEMBER_REF_EXPR) and \
+                       ref2.kind in (cindex.CursorKind.FUNCTION_DECL, cindex.CursorKind.CXX_METHOD,
+                                     cindex.CursorKind.FUNCTION_TEMPLATE, cindex.CursorKind.CONSTRUCTOR):
+                        return ref2, k2
+        return None, None
 
-        if kind in (cindex.CursorKind.IMPLICIT_CAST_EXPR, cindex.CursorKind.UNEXPOSED_EXPR):
-            kids = list(c.get_children())
-            if kids:
-                return self.build_expr(kids[0], want, cls_ctx)
-            return None
+    def call_args(self, cur, callee_ref):
+        args = []
+        for k in cur.get_children():
+            if k == callee_ref:
+                continue
+            if k.referenced is not None and callee_ref.referenced is not None \
+               and k.referenced == callee_ref.referenced:
+                continue
+            args.append(k)
+        return args
+
+    # ------------------------------------------------------------------ exprs
+    def expr(self, cur, want=None, cls_ctx=None):
+        kind = cur.kind
+
+        if kind in (cindex.CursorKind.UNEXPOSED_EXPR, cindex.CursorKind.PAREN_EXPR):
+            kids = list(cur.get_children())
+            return self.expr(kids[0], want, cls_ctx) if kids else None
 
         if kind == cindex.CursorKind.FLOATING_LITERAL:
-            return {"k": "lit", "ty": "f32", "sp": self.lit_spelling(c)}
+            return {"k": "lit", "ty": "f32", "sp": self.spelling_of(cur)}
 
         if kind == cindex.CursorKind.INTEGER_LITERAL:
-            sp = self.lit_spelling(c)
+            sp = self.spelling_of(cur)
             if want is not None and want["k"] == "f32":
-                return {"k": "lit", "ty": "f32", "sp": sp + ".0"}
+                return {"k": "lit", "ty": "f32", "sp": sp.rstrip("ul") + ".0"}
             if want is not None and want["k"] == "u32":
                 return {"k": "lit", "ty": "u32", "sp": sp}
             return {"k": "lit", "ty": "i32", "sp": sp}
 
         if kind == cindex.CursorKind.STRING_LITERAL:
-            raw = self.lit_spelling(c)
-            return {"k": "str", "v": raw}
+            return {"k": "str", "v": self.spelling_of(cur)}
 
-        if kind == cindex.CursorKind.DECL_REF_EXPR:
-            decl = c.referenced
-            name = c.spelling
-            if decl is not None and decl.kind == cindex.CursorKind.PARM_DECL:
-                pass
-            if decl is not None and decl.kind == cindex.CursorKind.VAR_DECL:
-                pass
-            return {"k": "var", "name": name}
+        if kind == cindex.CursorKind.CXX_BOOL_LITERAL_EXPR:
+            toks = [tk.spelling for tk in cur.get_tokens()]
+            return {"k": "lit", "ty": "bool", "sp": toks[0] if toks else "false"}
 
         if kind == cindex.CursorKind.CXX_THIS_EXPR:
             return {"k": "this", "cls": cls_ctx}
 
+        if kind == cindex.CursorKind.DECL_REF_EXPR:
+            return {"k": "var", "name": cur.spelling}
+
         if kind == cindex.CursorKind.MEMBER_REF_EXPR:
             base_c = None
-            kids = list(c.get_children())
-            # last-ish child is the base; first is decl context sometimes
-            for k in kids:
-                if k.kind != cindex.CursorKind.MEMBER_REF and k.type is not None and k.kind != cindex.CursorKind.TYPE_REF:
+            for k in cur.get_children():
+                if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF):
                     base_c = k
                     break
             if base_c is None:
-                if kids: base_c = kids[-1]
-                else: return None
-            # union-bitcast idiom: FBits local member access (b.f / b.u)
-            base_sp = base_c.spelling
-            if base_sp in self.local_types and self.local_types[base_sp] is not None \
-               and isinstance(self.local_types[base_sp], dict) and self.local_types[base_sp].get("k") == "fbits":
-                return {"k": "bitsget", "var": base_sp, "side": c.spelling}
-            base = self.build_expr(base_c, None, cls_ctx)
+                return None
+            bt = self.local_types.get(base_c.spelling)
+            if bt is not None and isinstance(bt, dict) and bt.get("k") == "fbits":
+                return {"k": "bitsget", "var": base_c.spelling, "side": cur.spelling}
+            base = self.expr(base_c, None, cls_ctx)
             if base is None:
                 return None
-            # C++ allows calling members through references/deref — already expr
-            name = c.spelling
-            if name == "mValue":
-                name = "mF32" if self.lane_field_name(base_c) == "mF32" else "mU32"
-            # Vec3/Vec4 Type values carry mData in C++; ours use class lanes
-            if name == "mData":
-                name = self.lane_field_name(base_c)
+            name = cur.spelling
+            if name in ("mF32", "mU32"):
+                name = "mValue"      # union arm -> canonical SIMD storage
             return {"k": "field", "obj": base, "name": name}
 
         if kind == cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR:
-            kids = list(c.get_children())
-            obj = self.build_expr(kids[0], None, cls_ctx)
-            idx = self.build_expr(kids[1], None, cls_ctx)
+            kids = list(cur.get_children())
+            obj = self.expr(kids[0], None, cls_ctx)
+            idx = self.expr(kids[1], None, cls_ctx)
             if obj is None or idx is None:
                 return None
-            return {"k": "index", "obj": obj, "idx": idx}
+            return {"k": "lane_get", "lanes": obj, "idx": idx, "ty": self.canon(cur.type)}
 
-        if kind == cindex.CursorKind.BINARY_OPERATOR or kind == cindex.CursorKind.COMPOUND_ASSIGN_OPERATOR:
-            kids = list(c.get_children())
-            if len(kids) < 2:
+        if kind == cindex.CursorKind.BINARY_OPERATOR:
+            return self.binop(cur, cls_ctx)
+
+        if kind == cindex.CursorKind.COMPOUND_ASSIGNMENT_OPERATOR:
+            op = self.op_token(cur, ("+=", "-=", "*=", "/=", "&=", "|=", "^=", "<<=", ">>=", "%="))
+            kids = list(cur.get_children())
+            if op is None or len(kids) < 2:
+                self.report(f"compound@{cur.location.line}", "unknown compound op")
                 return None
-            opcode = self.tu.get_tokens(c.extent)
-            # find operator token among children tokens
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            op = None
-            for cand in ("+", "-", "*", "/", "==", "!=", "<=", ">=", "<", ">",
-                         "&&", "||", "&", "|", "^", "<<", ">>", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "%"):
-                if cand in toks:
-                    op = cand
-                    break
-            if op is None:
-                self.report_unsupported(f"binop@{c.location.line}", "unknown binary operator token")
+            target = self.assign_target(kids[0], cls_ctx)
+            if target is None:
                 return None
-            lt = self.canon_type(kids[0].type)
-            rt = self.canon_type(kids[1].type)
-            res_t = self.canon_type(c.type)
-            # resolve class-typed binops to operator methods via clang's callee
-            callee = None
-            for k in kids:
-                if k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced is not None \
-                   and k.referenced.kind in (cindex.CursorKind.CXX_METHOD, cindex.CursorKind.FUNCTION_DECL):
-                    callee = k.referenced
-            if callee is not None and (lt and lt["k"] == "cls" or rt and rt["k"] == "cls"):
-                return self.operator_call_expr(callee, kids, cls_ctx)
-            # compound assignment statement-form: expanded at stmt level, but
-            # expression-form (rare) unsupported
-            if kind == cindex.CursorKind.COMPOUND_ASSIGN_OPERATOR:
-                self.report_unsupported(f"compound@{c.location.line}", "compound assignment in expression position")
+            rhs = self.expr(kids[1], self.canon(kids[1].type), cls_ctx)
+            if rhs is None:
                 return None
-            l = self.build_expr(kids[0], lt, cls_ctx)
-            r = self.build_expr(kids[1], rt, cls_ctx)
-            if l is None or r is None:
-                return None
-            ty = res_t if res_t is not None else (lt if lt else rt)
-            # ensure literals carry op result type (e.g. int/float mixing)
-            return {"k": "bin", "op": op, "l": l, "r": r, "ty": ty}
+            return {"k": "compound", "op": op[:-1], "target": target, "rhs": rhs,
+                    "ty": self.canon(cur.type)}
 
         if kind == cindex.CursorKind.UNARY_OPERATOR:
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            op = None
-            for cand in ("-", "!", "&", "*", "++", "--"):
-                if cand in toks:
-                    op = cand
-                    break
-            kids = [k for k in c.get_children() if k.kind != cindex.CursorKind.IMPLICIT_CAST_EXPR]
+            op = self.op_token(cur, ("-", "!", "&", "*", "++", "--"))
+            kids = list(cur.get_children())
             if op == "&":
-                inner = kids[0] if kids else None
-                if inner is None: return None
-                e = self.build_expr(inner, None, cls_ctx)
-                if e is None: return None
-                return {"k": "ref", "e": e}
-            if op == "*":  # deref of pointer param
-                inner = kids[0] if kids else None
-                if inner is None: return None
-                e = self.build_expr(inner, None, cls_ctx)
-                if e is None: return None
-                return {"k": "deref", "e": e}
+                if not kids:
+                    return None
+                e = self.expr(kids[0], None, cls_ctx)
+                return {"k": "ref", "e": e} if e else None
+            if op == "*":
+                if not kids:
+                    return None
+                e = self.expr(kids[0], None, cls_ctx)
+                return {"k": "deref", "e": e} if e else None
             if op in ("++", "--"):
-                self.report_unsupported(f"unary{op}@{c.location.line}", "inc/dec in expression position")
+                self.report(f"unary{op}@{cur.location.line}", "inc/dec in expression position")
                 return None
             if kids:
-                e = self.build_expr(kids[0], self.canon_type(c.type), cls_ctx)
-                if e is None: return None
-                return {"k": "un", "op": op, "e": e, "ty": self.canon_type(c.type)}
+                e = self.expr(kids[0], self.canon(cur.type), cls_ctx)
+                if e is None:
+                    return None
+                return {"k": "un", "op": op, "e": e, "ty": self.canon(cur.type)}
             return None
 
         if kind == cindex.CursorKind.CONDITIONAL_OPERATOR:
-            kids = list(c.get_children())
-            if len(kids) < 3: return None
-            cond = self.build_expr(kids[0], t_prim("bool"), cls_ctx)
-            then = self.build_expr(kids[1], self.canon_type(c.type), cls_ctx)
-            els = self.build_expr(kids[2], self.canon_type(c.type), cls_ctx)
-            if cond is None or then is None or els is None: return None
+            kids = list(cur.get_children())
+            if len(kids) < 3:
+                return None
+            cond = self.expr(kids[0], t("bool"), cls_ctx)
+            then = self.expr(kids[1], self.canon(cur.type), cls_ctx)
+            els = self.expr(kids[2], self.canon(cur.type), cls_ctx)
+            if cond is None or then is None or els is None:
+                return None
             return {"k": "sel", "cond": cond, "then": then, "els": els,
-                    "ty": self.canon_type(c.type)}
+                    "ty": self.canon(cur.type)}
 
-        if kind == cindex.CursorKind.CXX_BOOL_LITERAL_EXPR:
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            return {"k": "lit", "ty": "bool", "sp": toks[0] if toks else "false"}
-
-        if kind == cindex.CursorKind.CXX_OPERATOR_CALL_EXPR:
-            return self.build_operator_call(c, cls_ctx)
-
-        if kind == cindex.CursorKind.CXX_MEMBER_CALL_EXPR:
-            return self.build_member_call(c, cls_ctx)
-
-        if kind == cindex.CursorKind.CALL_EXPR:
-            return self.build_call(c, cls_ctx)
-
-        if kind == cindex.CursorKind.CXX_CONSTRUCT_EXPR:
-            return self.build_construct(c, cls_ctx)
-
-        if kind == cindex.CursorKind.CXX_STATIC_CAST_EXPR:
-            kids = list(c.get_children())
-            if kids:
-                inner = self.build_expr(kids[0], None, cls_ctx)
-                to_t = self.canon_type(c.type)
-                if inner is None or to_t is None: return None
-                return {"k": "cast", "e": inner, "to": to_t}
-            return None
-
-        if kind == cindex.CursorKind.CXX_DEFAULT_ARG_EXPR:
-            kids = list(c.get_children())
-            if kids:
-                return self.build_expr(kids[0], want, cls_ctx)
-            return None
+        if kind in (cindex.CursorKind.CXX_STATIC_CAST_EXPR, cindex.CursorKind.CSTYLE_CAST_EXPR,
+                    cindex.CursorKind.CXX_FUNCTIONAL_CAST_EXPR, cindex.CursorKind.CXX_CONST_CAST_EXPR,
+                    cindex.CursorKind.CXX_REINTERPRET_CAST_EXPR):
+            kids = list(cur.get_children())
+            if not kids:
+                return None
+            inner = self.expr(kids[0], None, cls_ctx)
+            to_ty = self.canon(cur.type)
+            if inner is None or to_ty is None:
+                return None
+            return {"k": "cast", "e": inner, "to": to_ty}
 
         if kind == cindex.CursorKind.INIT_LIST_EXPR:
-            # float arr init {a,b,c,d}
-            kids = list(c.get_children())
+            kids = list(cur.get_children())
+            arr_t = self.canon(cur.type)
             elems = []
-            arr_t = self.canon_type(c.type)
             for k in kids:
-                e = self.build_expr(k, arr_t["elem"] if arr_t and arr_t["k"] == "arr" else None, cls_ctx)
-                if e is None: return None
+                e = self.expr(k, arr_t["elem"] if arr_t and arr_t["k"] == "arr" else None, cls_ctx)
+                if e is None:
+                    return None
                 elems.append(e)
             return {"k": "arrlit", "elems": elems, "ty": arr_t}
 
-        self.report_unsupported(f"expr:{kind.name}@{c.location.line}", "unhandled expression kind")
+        if kind == cindex.CursorKind.CALL_EXPR:
+            return self.call(cur, cls_ctx)
+
+        self.report(f"expr:{kind.name}@{cur.location.line}", "unhandled expression kind")
         return None
 
-    # ------------------------------------------------------------------ names
-    def union_alias_name(self, member_ref_cursor):
-        """mValue (the union arm of Type) -> canonical lane field name of owner."""
-        return "mF32"  # UVec4 mValue reads are rewritten by lane_field_name below? no:
-        # NOTE: this is only correct for Vec3/Vec4; UVec4 handled via decl type.
-
-    def lane_field_name(self, base_cursor):
-        t = base_cursor.type
-        sp = t.spelling or ""
-        # UVec4 lanes are uint32
-        if "UVec4" in sp or (t.get_declaration() is not None and "UVec4" in (t.get_declaration().spelling or "")):
-            return "mU32"
-        return "mF32"
+    # ------------------------------------------------------------------ binop
+    def binop(self, cur, cls_ctx):
+        kids = list(cur.get_children())
+        if len(kids) < 2:
+            return None
+        op = self.op_token(cur, ("+", "-", "*", "/", "==", "!=", "<=", ">=",
+                                 "<", ">", "&&", "||", "&", "|", "^", "<<", ">>", "%"))
+        if op is None:
+            self.report(f"binop@{cur.location.line}", "unknown binary operator")
+            return None
+        l = self.expr(kids[0], self.canon(kids[0].type), cls_ctx)
+        r = self.expr(kids[1], self.canon(kids[1].type), cls_ctx)
+        if l is None or r is None:
+            return None
+        return {"k": "bin", "op": op, "l": l, "r": r, "ty": self.canon(cur.type)}
 
     # ------------------------------------------------------------------ calls
-    def method_ir_name(self, md, cls_ctx):
-        """Disambiguated IR name for a C++ method."""
-        raw = md.spelling
-        opmap = {"operator+": "op_add", "operator-": "op_sub", "operator*": "op_mul",
-                 "operator/": "op_div", "operator==": "op_eq", "operator!=": "op_ne",
-                 "operator[]": "op_index", "operator+=": "op_iadd", "operator-=": "op_isub",
-                 "operator*=": "op_imul", "operator/=": "op_idiv", "operator=": "op_assign"}
-        name = opmap.get(raw, raw)
-        sig = []
-        for p in md.get_arguments() if md.kind in (cindex.CursorKind.CXX_METHOD, cindex.CursorKind.FUNCTION_DECL, cindex.CursorKind.CXX_CONSTRUCTOR_DECL) else []:
-            pt = self.param_type(p.type, cls_ctx)
-            sig.append(ty_show(pt) if pt else "?")
-        if sig:
-            name = f"{name}@{'_'.join(sig)}"
-        return name
+    def call(self, cur, cls_ctx):
+        callee, callee_ref = self.callee_of(cur)
+        if callee is None:
+            self.report(f"call@{cur.location.line}", "call without resolvable callee")
+            return None
 
-    def operator_call_expr(self, callee_decl, arg_cursors, cls_ctx):
-        """A binary/unary op resolved by clang to a method or free function."""
-        cls = None
-        if callee_decl.kind == cindex.CursorKind.CXX_METHOD:
-            cls = callee_decl.semantic_parent.spelling
-        ir_name = self.method_ir_name(callee_decl, cls or cls_ctx)
-        if callee_decl.is_static_method() if hasattr(callee_decl, 'is_static_method') else False:
+        if callee.kind == cindex.CursorKind.CONSTRUCTOR:
+            cls_name = callee.semantic_parent.spelling
+            if cls_name not in TARGET_CLASSES:
+                self.report(f"ctor:{cls_name}@{cur.location.line}", "ctor of non-target class")
+                return None
             args = []
-            for a in arg_cursors:
-                pt = self.param_type(a.type, cls or cls_ctx)
-                e = self.build_expr(a, pt, cls_ctx)
-                if e is None: return None
-                args.append(e)
-            return {"k": "call", "cls": cls, "name": ir_name, "args": args,
-                    "ret": self.canon_type(callee_decl.result_type)}
-        # instance method: first arg is object
-        obj_c, arg_cs = arg_cursors[0], arg_cursors[1:]
-        obj = self.build_expr(obj_c, t_cls(cls) if cls else None, cls_ctx)
-        if obj is None: return None
-        mparams = list(callee_decl.get_arguments())
-        args = []
-        for a, p in zip(arg_cs, mparams):
-            pt = self.param_type(p.type, cls or cls_ctx)
-            e = self.build_expr(a, pt, cls_ctx)
-            if e is None: return None
-            args.append(e)
-        return {"k": "meth", "obj": obj, "cls": cls, "name": ir_name, "args": args,
-                "ret": self.canon_type(callee_decl.result_type)}
-
-    def build_operator_call(self, c, cls_ctx):
-        kids = list(c.get_children())
-        callee = None
-        for k in kids:
-            if k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced is not None \
-               and k.referenced.kind in (cindex.CursorKind.CXX_METHOD, cindex.CursorKind.FUNCTION_DECL):
-                callee = k.referenced
-        if callee is None:
-            self.report_unsupported(f"opcall@{c.location.line}", "operator call without resolvable callee")
-            return None
-        # friend scalar-mul rewrite: (float, Vec4) -> Vec4::op_mul(float)
-        arg_cursors = [k for k in kids if k.kind not in (cindex.CursorKind.DECL_REF_EXPR,
-                                                         cindex.CursorKind.TYPE_REF,
-                                                         cindex.CursorKind.UNEXPOSED_EXPR)]
-        # fall back: children minus the callee declref; keep order
-        arg_cursors = [k for k in kids if not (k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced == callee)]
-        if callee.spelling == "operator*" and len(arg_cursors) == 2:
-            first_cls = arg_cursors[0].type and arg_cursors[0].type.spelling
-            if "Vec4" in str(first_cls) or "Vec3" in str(first_cls):
-                pass  # member-form handled by operator_call_expr
-            else:
-                # (float, Vec4): rewrite as member call on arg1
-                obj = self.build_expr(arg_cursors[1], None, cls_ctx)
-                fp = self.build_expr(arg_cursors[0], t_prim("f32"), cls_ctx)
-                if obj is None or fp is None: return None
-                cls_name = arg_cursors[1].type.spelling.split()[0] if arg_cursors[1].type else "Vec4"
-                return {"k": "meth", "obj": obj, "cls": "Vec4",
-                        "name": "op_mul@f32", "args": [fp],
-                        "ret": t_cls("Vec4")}
-        return self.operator_call_expr(callee, arg_cursors, cls_ctx)
-
-    def build_member_call(self, c, cls_ctx):
-        """obj.method(args) — obj is an expression, callee is a CXX_METHOD."""
-        callee = None
-        obj_c = None
-        for k in c.get_children():
-            if k.kind == cindex.CursorKind.MEMBER_REF_EXPR and k.referenced is not None \
-               and k.referenced.kind == cindex.CursorKind.CXX_METHOD:
-                callee = k.referenced
-                mref = k
-        if callee is None:
-            self.report_unsupported(f"mcall@{c.location.line}", "member call without resolvable callee")
-            return None
-        cls = callee.semantic_parent.spelling
-        # object expression = the member-ref's base child
-        obj_c = None
-        for k in mref.get_children():
-            if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF, cindex.CursorKind.DECL_REF_EXPR if False else cindex.CursorKind.MEMBER_REF):
-                obj_c = k
-                break
-        if obj_c is None:
-            self.report_unsupported(f"mcall@{c.location.line}", "no object expression")
-            return None
-        obj_want = t_cls(cls) if not callee.is_static_method() else None
-        obj = self.build_expr(obj_c, obj_want, cls_ctx)
-        if obj is None: return None
-        mparams = list(callee.get_arguments())
-        arg_cursors = [k for k in c.get_children() if k.kind != cindex.CursorKind.MEMBER_REF_EXPR]
-        args = []
-        for i, a in enumerate(arg_cursors):
-            want = self.param_type(mparams[i].type, cls) if i < len(mparams) else None
-            e = self.build_expr(a, want, cls_ctx)
-            if e is None: return None
-            args.append(e)
-        ret = self.canon_type(callee.result_type)
-        if ret is None and callee.result_type.spelling == "Type" and cls in TYPE_ALIAS:
-            ret = t_cls(TYPE_ALIAS[cls])
-        if callee.is_static_method():
-            return {"k": "call", "cls": cls, "name": self.method_ir_name(callee, cls),
-                    "args": args, "ret": ret}
-        return {"k": "meth", "obj": obj, "cls": cls, "name": self.method_ir_name(callee, cls),
-                "args": args, "ret": ret}
-
-    def build_call(self, c, cls_ctx):
-        callee = None
-        fnref = None
-        for k in c.get_children():
-            if k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced is not None \
-               and k.referenced.kind in (cindex.CursorKind.FUNCTION_DECL,
-                                         cindex.CursorKind.CXX_METHOD,
-                                         cindex.CursorKind.FUNCTION_TEMPLATE):
-                fnref = k
-                callee = k.referenced
-        if callee is None:
-            # maybe a method call path (CXX_MEMBER_CALL) handled elsewhere
-            self.report_unsupported(f"call@{c.location.line}", "call without resolvable callee")
-            return None
-        fname = callee.spelling
-        arg_cursors = [k for k in c.get_children() if not (k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced == callee)]
-
-        # printf lowering
-        if fname == "printf":
-            return self.lower_printf(arg_cursors, cls_ctx)
-
-        # static class methods (e.g. Vec4::sEquals) — clang gives CXX_METHOD
-        if callee.kind == cindex.CursorKind.CXX_METHOD and callee.is_static_method():
-            cls = callee.semantic_parent.spelling
             mparams = list(callee.get_arguments())
-            args = []
-            for i, a in enumerate(arg_cursors):
-                want = self.param_type(mparams[i].type, cls) if i < len(mparams) else None
-                e = self.build_expr(a, want, cls_ctx)
-                if e is None: return None
+            for i, a in enumerate(self.call_args(cur, callee_ref)):
+                w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
+                e = self.expr(a, w, cls_ctx)
+                if e is None:
+                    return None
                 args.append(e)
-            ret = self.canon_type(callee.result_type)
-            if ret is None and callee.result_type.spelling == "Type" and cls in TYPE_ALIAS:
-                ret = t_cls(TYPE_ALIAS[cls])
-            return {"k": "call", "cls": cls, "name": self.method_ir_name(callee, cls),
-                    "args": args, "ret": ret}
+            return {"k": "ctor", "cls": cls_name, "args": args, "nargs": len(args)}
 
-        # math intrinsics (free fns resolved in JPH namespace or std)
-        if fname in ("min", "max", "abs", "sqrt", "sqrtf", "isnan", "signbit",
-                     "CountTrailingZeros", "fabs", "fabsf", "Sqrt"):
+        name = callee.spelling
+
+        # built-in copy assignment surfaces as an overloaded operator= call
+        if name == "operator=" and callee.kind == cindex.CursorKind.CXX_METHOD and \
+           callee.semantic_parent.spelling in TARGET_CLASSES:
+            cls_name = callee.semantic_parent.spelling
+            acs = self.call_args(cur, callee_ref)
+            if callee_ref.kind == cindex.CursorKind.MEMBER_REF_EXPR:
+                base_c = [k for k in callee_ref.get_children()
+                          if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF)][0]
+                target = self.expr(base_c, t_cls(cls_name), cls_ctx)
+            else:
+                target = self.expr(acs[0], t_cls(cls_name), cls_ctx)
+                acs = acs[1:]
+            if target is None or not acs:
+                return None
+            value = self.expr(acs[0], t_cls(cls_name), cls_ctx)
+            if value is None:
+                return None
+            return {"k": "assignexpr", "target": target, "value": value}
+
+        if callee.kind == cindex.CursorKind.FUNCTION_TEMPLATE:
+            self.report(f"tmplcall:{name}@{cur.location.line}", "unresolved template function call")
+            return None
+
+        if name == "printf":
+            return self.lower_printf(self.call_args(cur, callee_ref), cls_ctx)
+
+        if name in SSE_TABLE:
+            opname, arity, rk = SSE_TABLE[name]
+            acs = self.call_args(cur, callee_ref)
+            # immediate-operand intrinsics: last arg must fold to a constant
+            if opname in ("shuffle", "insert", "shufflei", "srai", "slli", "srli", "blend_ps"):
+                if len(acs) < 3 and opname != "shufflei" or opname == "shufflei" and len(acs) != 2:
+                    self.report(f"sse:{name}@{cur.location.line}", f"bad {opname} shape")
+                    return None
+                imm_n = 2 if opname == "shufflei" else 3
+                args_c = acs[:imm_n - 1]
+                imm = self.const_eval_int(acs[imm_n - 1])
+                if imm is None:
+                    self.report(f"sse:{opname}@{cur.location.line}", "non-constant imm")
+                    return None
+                args = []
+                for a in args_c:
+                    e = self.expr(a, None, cls_ctx)
+                    if e is None:
+                        return None
+                    args.append(e)
+                ret_ty = self.canon(cur.type) or t(rk)
+                return {"k": "simd", "name": opname, "args": args, "imm": imm, "ty": ret_ty}
+            # _mm_set_ps / _mm_set_epi32 take args in reversed order
+            if opname in ("set4", "set4u") and name in ("_mm_set_ps", "_mm_set_epi32"):
+                acs = list(reversed(acs))
+            if arity == 0:
+                return {"k": "simd", "name": opname, "args": [], "ty": t(rk)}
             args = []
-            for a in arg_cursors:
-                e = self.build_expr(a, None, cls_ctx)
-                if e is None: return None
+            for a in acs[:arity]:
+                e = self.expr(a, None, cls_ctx)
+                if e is None:
+                    return None
                 args.append(e)
-            if fname in ("min", "max"):
-                res_t = self.canon_type(c.type)
-                op = "<" if fname == "min" else ">"
-                return {"k": "sel", "cond": {"k": "bin", "op": op, "l": args[0], "r": args[1],
-                                             "ty": t_prim("bool")},
-                        "then": args[0] if fname == "min" else args[1],
-                        "els": args[1] if fname == "min" else args[0],
-                        "ty": res_t}
-            iname = {"abs": "abs", "sqrt": "sqrt", "sqrtf": "sqrt", "fabs": "abs",
-                     "fabsf": "abs", "Sqrt": "sqrt", "isnan": "is_nan", "signbit": "signbit",
-                     "CountTrailingZeros": "ctz"}[fname]
-            return {"k": "intrinsic", "name": iname, "args": args,
-                    "ty": self.canon_type(c.type)}
+            ret_ty = self.canon(cur.type) if rk != "void" else t("void")
+            if ret_ty is None:
+                ret_ty = t(rk)
+            return {"k": "simd", "name": opname, "args": args, "ty": ret_ty}
 
-        # free function in our module (battery helpers etc.)
+        if name in ("min", "max", "abs", "sqrt", "sqrtf", "fabs", "fabsf", "Sqrt",
+                    "isnan", "signbit", "CountTrailingZeros"):
+            args = []
+            for a in self.call_args(cur, callee_ref):
+                e = self.expr(a, None, cls_ctx)
+                if e is None:
+                    return None
+                args.append(e)
+            if name in ("min", "max"):
+                op = "<" if name == "min" else ">"
+                l, r = args[0], args[1]
+                return {"k": "sel",
+                        "cond": {"k": "bin", "op": op, "l": l, "r": r, "ty": t("bool")},
+                        "then": l if name == "min" else r,
+                        "els": r if name == "min" else l,
+                        "ty": self.canon(cur.type)}
+            iname = {"abs": "abs", "fabs": "abs", "fabsf": "abs", "sqrt": "sqrt",
+                     "sqrtf": "sqrt", "Sqrt": "sqrt", "isnan": "is_nan",
+                     "signbit": "signbit", "CountTrailingZeros": "ctz"}[name]
+            return {"k": "intrinsic", "name": iname, "args": args, "ty": self.canon(cur.type)}
+
+        # class methods: static via DECL_REF_EXPR; instance via MEMBER_REF_EXPR base
+        if callee.kind == cindex.CursorKind.CXX_METHOD and \
+           callee.semantic_parent.spelling in TARGET_CLASSES:
+            cls_name = callee.semantic_parent.spelling
+            ret = self.canon(callee.result_type)
+            if ret is None and callee.result_type.spelling == "Type" and cls_name in TYPE_ALIAS:
+                ret = t(TYPE_ALIAS[cls_name])
+            if ret is None and "unsigned" in callee.result_type.spelling:
+                ret = t("u32")
+            mparams = list(callee.get_arguments())
+            acs = self.call_args(cur, callee_ref)
+            if callee.is_static_method() or callee_ref.kind == cindex.CursorKind.DECL_REF_EXPR:
+                # static call (Vec4::sEquals(...)) — possibly via DECL_REF_EXPR
+                args = []
+                for i, a in enumerate(acs):
+                    w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
+                    e = self.expr(a, w, cls_ctx)
+                    if e is None:
+                        return None
+                    args.append(e)
+                return {"k": "call", "cls": cls_name,
+                        "name": self.ir_method_name(callee, cls_name), "args": args, "ret": ret}
+            # instance call: object = base of the MEMBER_REF_EXPR callee
+            base_c = None
+            for k in callee_ref.get_children():
+                if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF):
+                    base_c = k
+                    break
+            if base_c is None:
+                return None
+            obj = self.expr(base_c, t_cls(cls_name), cls_ctx)
+            if obj is None:
+                return None
+            args = []
+            for i, a in enumerate(acs):
+                w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
+                e = self.expr(a, w, cls_ctx)
+                if e is None:
+                    return None
+                args.append(e)
+            return {"k": "meth", "obj": obj, "cls": cls_name,
+                    "name": self.ir_method_name(callee, cls_name), "args": args, "ret": ret}
+
+        # friend operator*(float, class) -> member call rewrite (commutative)
+        if callee.kind == cindex.CursorKind.FUNCTION_DECL and name == "operator*":
+            acs = self.call_args(cur, callee_ref)
+            if len(acs) == 2 and "Vec" not in acs[0].type.spelling:
+                obj = self.expr(acs[1], None, cls_ctx)
+                fp = self.expr(acs[0], t("f32"), cls_ctx)
+                if obj is None or fp is None:
+                    return None
+                cls_name = acs[1].type.spelling.split()[0]
+                return {"k": "meth", "obj": obj, "cls": cls_name,
+                        "name": "op_mul@f32", "args": [fp], "ret": t_cls(cls_name)}
+
+        # free function in module (battery helpers, BitsOf, ...)
         args = []
-        for a in arg_cursors:
-            e = self.build_expr(a, None, cls_ctx)
-            if e is None: return None
+        for a in self.call_args(cur, callee_ref):
+            e = self.expr(a, None, cls_ctx)
+            if e is None:
+                return None
             args.append(e)
-        ret = self.canon_type(c.type) or self.canon_type(callee.result_type)
-        if ret is None and (callee.result_type.spelling == "void" or c.type.spelling == "void"):
-            ret = t_prim("void")
-        return {"k": "call", "cls": None, "name": fname, "args": args, "ret": ret}
+        ret = self.canon(callee.result_type) or self.canon(cur.type)
+        if ret is None and callee.result_type.spelling == "void":
+            ret = t("void")
+        return {"k": "call", "cls": None, "name": name, "args": args, "ret": ret}
 
-    def lower_printf(self, arg_cursors, cls_ctx):
-        """printf("fmt", args) -> emit sequence. Supports %s %08x %u and \n."""
-        if not arg_cursors:
+    # ------------------------------------------------------------------ printf
+    def lower_printf(self, acs, cls_ctx):
+        if not acs:
             return None
-        fmt_c = self.strip_cast(arg_cursors[0])
-        if fmt_c is None or fmt_c.kind != cindex.CursorKind.STRING_LITERAL:
-            self.report_unsupported("printf", "non-literal format string")
+        fmt_c = self.strip(acs[0])
+        if fmt_c.kind != cindex.CursorKind.STRING_LITERAL:
+            self.report("printf", "non-literal format string")
             return None
-        fmt = self.lit_spelling(fmt_c)
-        fmt = fmt[1:-1] if len(fmt) >= 2 else fmt  # strip quotes
-        fmt = fmt.replace("\\n", "\n")
+        fmt = self.spelling_of(fmt_c)[1:-1].replace("\\n", "\n")
         seq = []
-        args = arg_cursors[1:]
-        ai = 0
-        i = 0
+        args = acs[1:]
         text = ""
+        ai, i = 0, 0
         while i < len(fmt):
             if fmt[i] == "%" and i + 1 < len(fmt):
-                if fmt[i:i+5] == "%08x" or fmt[i:i+4] == "%08X":
-                    if text: seq.append({"k": "emit", "kind": "str", "v": text}); text = ""
-                    e = self.build_expr(args[ai], t_prim("u32"), cls_ctx); ai += 1
-                    if e is None: return None
+                if fmt[i:i+5] in ("%08x", "%08X"):
+                    if text:
+                        seq.append({"k": "emit", "kind": "str", "v": text})
+                        text = ""
+                    e = self.expr(args[ai], t("u32"), cls_ctx)
+                    ai += 1
+                    if e is None:
+                        return None
                     seq.append({"k": "emit", "kind": "hex32", "e": e})
-                    i += 5 if fmt[i:i+5] == "%08x" else 4
+                    i += 5
                     continue
                 if fmt[i:i+2] == "%u":
-                    if text: seq.append({"k": "emit", "kind": "str", "v": text}); text = ""
-                    e = self.build_expr(args[ai], t_prim("u32"), cls_ctx); ai += 1
-                    if e is None: return None
+                    if text:
+                        seq.append({"k": "emit", "kind": "str", "v": text})
+                        text = ""
+                    e = self.expr(args[ai], t("u32"), cls_ctx)
+                    ai += 1
+                    if e is None:
+                        return None
                     seq.append({"k": "emit", "kind": "u32", "e": e})
                     i += 2
                     continue
                 if fmt[i:i+2] == "%s":
-                    if text: seq.append({"k": "emit", "kind": "str", "v": text}); text = ""
-                    e = self.build_expr(args[ai], t_prim("cstr"), cls_ctx); ai += 1
-                    if e is None: return None
+                    if text:
+                        seq.append({"k": "emit", "kind": "str", "v": text})
+                        text = ""
+                    e = self.expr(args[ai], t("cstr"), cls_ctx)
+                    ai += 1
+                    if e is None:
+                        return None
                     seq.append({"k": "emit", "kind": "str", "e": e})
                     i += 2
                     continue
             if fmt[i] == "\n":
-                if text: seq.append({"k": "emit", "kind": "str", "v": text}); text = ""
+                if text:
+                    seq.append({"k": "emit", "kind": "str", "v": text})
+                    text = ""
                 seq.append({"k": "emit", "kind": "endln"})
                 i += 1
                 continue
@@ -653,511 +718,476 @@ class Frontend:
             seq.append({"k": "emit", "kind": "str", "v": text})
         return {"k": "emitseq", "seq": seq}
 
-    def build_construct(self, c, cls_ctx):
-        ctor = None
-        for k in c.get_children():
-            if k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced is not None \
-               and k.referenced.kind == cindex.CursorKind.CXX_CONSTRUCTOR_DECL:
-                ctor = k.referenced
-        cls_name = c.type.spelling.split("<")[0].strip()
-        if cls_name not in TARGET_CLASSES:
-            self.report_unsupported(f"ctor:{cls_name}@{c.location.line}", "construction of non-target class")
-            return None
-        arg_cursors = [k for k in c.get_children()
-                       if k.kind not in (cindex.CursorKind.DECL_REF_EXPR, cindex.CursorKind.TYPE_REF, cindex.CursorKind.UNEXPOSED_EXPR)] \
-            if ctor is None else \
-            [k for k in c.get_children() if not (k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced == ctor)]
-        args = []
-        mparams = list(ctor.get_arguments()) if ctor is not None else []
-        for i, a in enumerate(arg_cursors):
-            want = None
-            if i < len(mparams):
-                want = self.param_type(mparams[i].type, cls_name)
-            e = self.build_expr(a, want, cls_ctx)
-            if e is None: return None
-            args.append(e)
-        return {"k": "ctor", "cls": cls_name, "args": args}
+    # ------------------------------------------------------------------ names
+    def ir_method_name(self, md, cls_ctx):
+        raw = md.spelling
+        name = OPMAP.get(raw, raw)
+        sig = []
+        for p in md.get_arguments():
+            pt = self.param_ty(p.type, cls_ctx)
+            sig.append(ty_show(pt) if pt else "?")
+        if sig:
+            name = f"{name}@{'_'.join(sig)}"
+        return name
 
-    # ------------------------------------------------------------------ stmts
-    def build_stmts(self, stmt_cursor, cls_ctx, out):
-        for c in stmt_cursor.get_children():
-            self.build_stmt(c, cls_ctx, out)
+    # ------------------------------------------------------------------ statements
+    def stmts(self, cur, cls_ctx, out):
+        for k in cur.get_children():
+            self.stmt(k, cls_ctx, out)
 
-    def build_stmt(self, c, cls_ctx, out):
-        kind = c.kind
+    def stmt(self, cur, cls_ctx, out):
+        kind = cur.kind
 
         if kind == cindex.CursorKind.COMPOUND_STMT:
-            self.build_stmts(c, cls_ctx, out)
+            self.stmts(cur, cls_ctx, out)
             return
 
         if kind == cindex.CursorKind.DECL_STMT:
-            for d in c.get_children():
-                if d.kind != cindex.CursorKind.VAR_DECL:
-                    self.report_unsupported(f"decl:{d.kind.name}@{c.location.line}", "non-var declaration")
-                    continue
-                self.lower_vardecl(d, cls_ctx, out)
+            for d in cur.get_children():
+                if d.kind == cindex.CursorKind.VAR_DECL:
+                    self.vardecl(d, cls_ctx, out)
             return
 
         if kind == cindex.CursorKind.IF_STMT:
-            kids = list(c.get_children())
-            cond = None
-            then_c = None
-            else_c = None
-            seen = []
-            for k in kids:
-                seen.append(k)
-            # children: (guard var decl?) cond, then, else
-            noncond = []
-            for k in kids:
-                if k.kind == cindex.CursorKind.COMPOUND_STMT:
-                    noncond.append(k)
-            cond = self.build_expr(kids[0], t_prim("bool"), cls_ctx) if kids else None
-            if cond is None or len(noncond) < 1:
-                self.report_unsupported(f"if@{c.location.line}", "unresolvable if shape")
+            kids = list(cur.get_children())
+            comps = [k for k in kids if k.kind == cindex.CursorKind.COMPOUND_STMT]
+            cond = self.expr(kids[0], t("bool"), cls_ctx) if kids else None
+            if cond is None or not comps:
+                self.report(f"if@{cur.location.line}", "unresolvable if shape")
                 return
-            then_body = []
-            self.build_stmt(noncond[0], cls_ctx, then_body)
-            els_body = []
-            if len(noncond) > 1:
-                self.build_stmt(noncond[1], cls_ctx, els_body)
-            out.append({"k": "if", "cond": cond, "then": then_body, "els": els_body})
+            then, els = [], []
+            self.stmt(comps[0], cls_ctx, then)
+            if len(comps) > 1:
+                self.stmt(comps[1], cls_ctx, els)
+            out.append({"k": "if", "cond": cond, "then": then, "els": els})
             return
 
         if kind == cindex.CursorKind.FOR_STMT:
-            body_c = None
-            var_name, start, stop, incr_op = "i", None, None, 1
-            cond_cmp = "<"
+            var_name, start, stop = None, None, None
             body = []
-            # canonical: for (int i = 0; i < 4; ++i) — lowered to IR for
-            init_done = False
-            for k in c.get_children():
-                if k.kind == cindex.CursorKind.COMPOUND_STMT:
-                    body_c = k
-                elif k.kind == cindex.CursorKind.DECL_STMT and not init_done:
+            for k in cur.get_children():
+                if k.kind == cindex.CursorKind.DECL_STMT and start is None:
                     d = list(k.get_children())[0]
                     var_name = d.spelling
-                    init_e = list(d.get_children())
-                    init = self.build_expr(init_e[0], t_prim("i32"), cls_ctx) if init_e else None
-                    start = init
-                    init_done = True
-                elif k.kind in (cindex.CursorKind.BINARY_OPERATOR,) and start is not None and stop is None:
-                    toks = [t.spelling for t in self.tu.get_tokens(k.extent)]
-                    cond_cmp = "<" if "<" in toks else "<=" if "<=" in toks else "<"
+                    inits = list(d.get_children())
+                    start = self.expr(inits[0], t("i32"), cls_ctx) if inits else None
+                elif k.kind == cindex.CursorKind.BINARY_OPERATOR and stop is None and start is not None:
                     kids2 = list(k.get_children())
-                    stop = self.build_expr(kids2[1], t_prim("i32"), cls_ctx)
-                elif k.kind == cindex.CursorKind.UNARY_OPERATOR:
-                    pass  # ++i ignored (step 1)
-            if body_c is not None:
-                self.build_stmt(body_c, cls_ctx, body)
-            if start is None or stop is None:
-                self.report_unsupported(f"for@{c.location.line}", "non-canonical for loop")
+                    stop = self.expr(kids2[-1], t("i32"), cls_ctx)
+            for k in cur.get_children():
+                if k.kind == cindex.CursorKind.COMPOUND_STMT:
+                    self.stmt(k, cls_ctx, body)
+            if var_name is None or start is None or stop is None:
+                self.report(f"for@{cur.location.line}", "non-canonical for loop")
                 return
             out.append({"k": "for", "var": var_name, "start": start, "stop": stop, "body": body})
             return
 
         if kind == cindex.CursorKind.WHILE_STMT:
-            kids = list(c.get_children())
+            kids = list(cur.get_children())
             comps = [k for k in kids if k.kind == cindex.CursorKind.COMPOUND_STMT]
-            cond = self.build_expr(kids[0], t_prim("bool"), cls_ctx) if kids else None
-            body = []
-            if comps and cond is not None:
-                self.build_stmt(comps[0], cls_ctx, body)
-                out.append({"k": "while", "cond": cond, "body": body})
+            cond = self.expr(kids[0], t("bool"), cls_ctx) if kids else None
+            if cond is None or not comps:
+                self.report(f"while@{cur.location.line}", "unresolvable while")
                 return
-            self.report_unsupported(f"while@{c.location.line}", "unresolvable while")
+            body = []
+            self.stmt(comps[0], cls_ctx, body)
+            out.append({"k": "while", "cond": cond, "body": body})
             return
 
         if kind == cindex.CursorKind.RETURN_STMT:
-            kids = list(c.get_children())
+            kids = list(cur.get_children())
             if not kids:
                 out.append({"k": "return", "e": None})
                 return
-            e = self.build_expr(kids[0], None, cls_ctx)
+            e = self.expr(kids[0], None, cls_ctx)
             if e is None:
                 return
             out.append({"k": "return", "e": e})
             return
 
         if kind == cindex.CursorKind.CALL_EXPR:
-            e = self.build_call(c, cls_ctx)
-            if e is None: return
-            self.emit_expr_stmt(e, cls_ctx, out)
-            return
-
-        if kind == cindex.CursorKind.CXX_OPERATOR_CALL_EXPR:
-            e = self.build_operator_call(c, cls_ctx)
-            if e is None: return
-            self.emit_expr_stmt(e, cls_ctx, out)
+            e = self.call(cur, cls_ctx)
+            if e is None:
+                return
+            if e["k"] == "emitseq":
+                out.extend(e["seq"])
+            elif e["k"] == "assignexpr":
+                self.expand_assign(e["target"], e["value"], cls_ctx, out)
+            else:
+                out.append({"k": "expr", "e": e})
             return
 
         if kind == cindex.CursorKind.BINARY_OPERATOR:
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            if "=" in toks and not any(x in toks for x in ("==", "!=", "<=", ">=", "+=", "-=", "*=", "/=")):
-                kids = list(c.get_children())
-                target = self.build_assign_target(kids[0], cls_ctx)
-                val_t = self.canon_type(kids[1].type)
-                val = self.build_expr(kids[1], val_t, cls_ctx)
-                if target is None or val is None: return
+            toks = [tk.spelling for tk in cur.get_tokens()]
+            if "=" in toks and not any(x in toks for x in
+                                       ("==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "&=", "|=", "^=", "<<=", ">>=")):
+                kids = list(cur.get_children())
+                target = self.assign_target(kids[0], cls_ctx)
+                val = self.expr(kids[1], self.canon(kids[1].type), cls_ctx)
+                if target is None or val is None:
+                    return
                 self.expand_assign(target, val, cls_ctx, out)
                 return
-            e = self.build_expr(c, None, cls_ctx)
-            if e is None: return
-            out.append({"k": "expr", "e": e})
+            e = self.expr(cur, None, cls_ctx)
+            if e is not None:
+                out.append({"k": "expr", "e": e})
             return
 
-        if kind == cindex.CursorKind.COMPOUND_ASSIGN_OPERATOR:
-            kids = list(c.get_children())
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            op = None
-            for cand in ("+=", "-=", "*=", "/=", "&=", "|=", "^=", "<<=", ">>=", "%="):
-                if cand in toks:
-                    op = cand[:-1]
-                    break
-            if op is None:
-                self.report_unsupported(f"compound@{c.location.line}", "unknown compound op")
+        if kind == cindex.CursorKind.COMPOUND_ASSIGNMENT_OPERATOR:
+            e = self.expr(cur, cls_ctx)
+            if e is None:
                 return
-            target = self.build_assign_target(kids[0], cls_ctx)
-            rhs = self.build_expr(kids[1], self.canon_type(kids[1].type), cls_ctx)
-            if target is None or rhs is None: return
-            cur = {"k": "field", "obj": {"k": "this"}, "name": "mF32"}  # placeholder never used
-            self.expand_assign(target, {"k": "bin", "op": op, "l": self.clone_target_read(target), "r": rhs,
-                                        "ty": self.canon_type(c.type)}, cls_ctx, out)
+            self.expand_compound(e, cls_ctx, out)
             return
 
         if kind == cindex.CursorKind.UNARY_OPERATOR:
-            toks = [t.spelling for t in self.tu.get_tokens(c.extent)]
-            kids = [k for k in c.get_children()]
-            if "++" in toks or "--" in toks:
-                op = "+" if "++" in toks else "-"
-                target = self.build_assign_target(kids[0], cls_ctx)
-                if target is None: return
+            op = self.op_token(cur, ("-", "!", "&", "*", "++", "--"))
+            kids = list(cur.get_children())
+            if op in ("++", "--") and kids:
+                target = self.assign_target(kids[0], cls_ctx)
+                if target is None:
+                    return
                 one = {"k": "lit", "ty": "i32", "sp": "1"}
-                self.expand_assign(target, {"k": "bin", "op": op, "l": self.clone_target_read(target),
-                                            "r": one, "ty": t_prim("i32")}, cls_ctx, out)
+                self.expand_assign(target,
+                                   {"k": "bin", "op": "+" if op == "++" else "-",
+                                    "l": self.target_read(target), "r": one, "ty": t("i32")},
+                                   cls_ctx, out)
                 return
-            e = self.build_expr(c, None, cls_ctx)
-            if e is None: return
-            out.append({"k": "expr", "e": e})
+            e = self.expr(cur, None, cls_ctx)
+            if e is not None:
+                out.append({"k": "expr", "e": e})
             return
 
-        if kind == cindex.CursorKind.EXPR_STMT or kind == cindex.CursorKind.UNEXPOSED_EXPR:
-            for k in c.get_children():
-                self.build_stmt(k, cls_ctx, out)
+        # last resort: expression statements (clang 18 has no EXPR_STMT kind)
+        e = self.expr(cur, None, cls_ctx)
+        if e is not None:
+            if e["k"] == "emitseq":
+                out.extend(e["seq"])
+            else:
+                out.append({"k": "expr", "e": e})
             return
 
-        self.report_unsupported(f"stmt:{kind.name}@{c.location.line}", "unhandled statement kind")
+        self.report(f"stmt:{kind.name}@{cur.location.line}", "unhandled statement kind")
 
-    def emit_expr_stmt(self, e, cls_ctx, out):
-        # printf lowering produces emitseq; bare calls produce call exprs
-        if e["k"] == "emitseq":
-            out.extend(e["seq"])
-        else:
-            out.append({"k": "expr", "e": e})
+    # ------------------------------------------------------------------ assignment targets
+    def assign_target(self, cur, cls_ctx):
+        kind = cur.kind
+        if kind == cindex.CursorKind.CALL_EXPR:
+            callee, ref = self.callee_of(cur)
+            if callee is not None and callee.spelling == "operator[]":
+                acs = self.call_args(cur, ref)
+                if len(acs) >= 2:
+                    obj = self.expr(acs[0], None, cls_ctx)
+                    idx = self.expr(acs[1], None, cls_ctx)
+                    if obj is not None and idx is not None:
+                        return {"k": "lane_get", "lanes": obj, "idx": idx,
+                                "ty": self.canon(cur.type), "mut": True}
+            self.report(f"target:call@{cur.location.line}", "call not assignable")
+            return None
+        if kind == cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR:
+            kids = list(cur.get_children())
+            obj = self.expr(kids[0], None, cls_ctx)
+            idx = self.expr(kids[1], None, cls_ctx)
+            if obj is None or idx is None:
+                return None
+            return {"k": "lane_get", "lanes": obj, "idx": idx,
+                    "ty": self.canon(cur.type), "mut": True}
+        return self.expr(cur, None, cls_ctx)
 
-    def build_assign_target(self, c, cls_ctx):
-        """LHS of assignment -> IR expr usable as target."""
-        kind = c.kind
-        if kind in (cindex.CursorKind.DECL_REF_EXPR, cindex.CursorKind.MEMBER_REF_EXPR,
-                    cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR, cindex.CursorKind.UNARY_OPERATOR,
-                    cindex.CursorKind.CXX_OPERATOR_CALL_EXPR):
-            if kind == cindex.CursorKind.UNARY_OPERATOR:
-                e = self.build_expr(c, None, cls_ctx)   # *ptr
-                return e
-            if kind == cindex.CursorKind.CXX_OPERATOR_CALL_EXPR:
-                # d[1] = ... : operator[] resolved; detect callee spelling
-                callee = None
-                for k in c.get_children():
-                    if k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced is not None \
-                       and k.referenced.kind == cindex.CursorKind.CXX_METHOD:
-                        callee = k.referenced
-                if callee is not None and callee.spelling == "operator[]":
-                    kids = [k for k in c.get_children() if not (k.kind == cindex.CursorKind.DECL_REF_EXPR and k.referenced == callee)]
-                    obj = self.build_expr(kids[0], None, cls_ctx)
-                    idx = self.build_expr(kids[1], None, cls_ctx)
-                    if obj is None or idx is None: return None
-                    return {"k": "index", "obj": obj, "idx": idx, "mut_index": True}
-                return self.build_expr(c, None, cls_ctx)
-            # member ref: flatten mValue
-            if kind == cindex.CursorKind.MEMBER_REF_EXPR and c.spelling == "mValue":
-                base_c = None
-                for k in c.get_children():
-                    if k.kind != cindex.CursorKind.MEMBER_REF and k.kind != cindex.CursorKind.TYPE_REF:
-                        base_c = k
-                        break
-                base = self.build_expr(base_c, None, cls_ctx) if base_c is not None else {"k": "this"}
-                return {"k": "field", "obj": base, "name": self.lane_field_name(base_c) if base_c is not None else "mF32"}
-            return self.build_expr(c, None, cls_ctx)
-        self.report_unsupported(f"target:{kind.name}@{c.location.line}", "unassignable target")
-        return None
-
-    def clone_target_read(self, target):
-        """Readable copy of an assignment target (for compound-op expansion)."""
-        t = json.loads(json.dumps(target))
-        if t.get("mut_index"):
-            t["mut_index"] = False
-        return t
+    def target_read(self, target):
+        tt = json.loads(json.dumps(target))
+        tt.pop("mut", None)
+        return tt
 
     def expand_assign(self, target, value, cls_ctx, out):
-        # assign-to-this: expand to per-field copies (C# cannot assign this)
         if target["k"] == "this":
-            cls = cls_ctx
-            flds = self.classes.get(cls, {}).get("fields", [])
-            for f in flds:
-                if f["ty"]["k"] == "arr":
-                    for i in range(f["ty"]["n"]):
-                        out.append({"k": "assign",
-                                    "target": {"k": "index", "obj": {"k": "field", "obj": {"k": "this"}, "name": f["name"]},
-                                               "idx": {"k": "lit", "ty": "i32", "sp": str(i)}},
-                                    "value": {"k": "index", "obj": value, "idx": {"k": "lit", "ty": "i32", "sp": str(i)}}})
-                else:
-                    out.append({"k": "assign",
-                                "target": {"k": "field", "obj": {"k": "this"}, "name": f["name"]},
-                                "value": {"k": "field", "obj": value, "name": f["name"]}})
-            return
-        # whole-array copy -> per-element (C# fixed arrays cannot be assigned whole)
-        tgt_ty = self.target_type(target)
-        if tgt_ty is not None and tgt_ty["k"] == "arr":
-            for i in range(tgt_ty["n"]):
+            for f in self.classes.get(cls_ctx, {}).get("fields", []):
                 out.append({"k": "assign",
-                            "target": {"k": "index", "obj": target, "idx": {"k": "lit", "ty": "i32", "sp": str(i)}},
-                            "value": {"k": "index", "obj": value, "idx": {"k": "lit", "ty": "i32", "sp": str(i)}}})
+                            "target": {"k": "field", "obj": {"k": "this", "cls": cls_ctx},
+                                       "name": f["name"]},
+                            "value": {"k": "field", "obj": value, "name": f["name"]}})
+            return
+        if target["k"] == "lane_get" and target.get("mut"):
+            out.append({"k": "assign",
+                        "target": target["lanes"],
+                        "value": {"k": "lane_set", "lanes": self.target_read(target),
+                                  "idx": target["idx"], "v": value,
+                                  "ty": target.get("ty")}})
             return
         out.append({"k": "assign", "target": target, "value": value})
 
-    def target_type(self, target):
-        if target["k"] == "var":
-            return self.local_types.get(target["name"])
-        if target["k"] == "field":
-            obj_ty = self.expr_type(target["obj"])
-            if obj_ty is not None and obj_ty["k"] == "cls":
-                for f in self.classes.get(obj_ty["name"], {}).get("fields", []):
-                    if f["name"] == target["name"]:
-                        return f["ty"]
-        if target["k"] == "index":
-            obj_ty = self.expr_type(target["obj"])
-            if obj_ty is not None and obj_ty["k"] == "cls":
-                for f in self.classes.get(obj_ty["name"], {}).get("fields", []):
-                    if f["name"] in ("mF32", "mU32"):
-                        return f["ty"]["elem"]
-        return None
+    def expand_compound(self, e, cls_ctx, out):
+        value = {"k": "bin", "op": e["op"], "l": self.target_read(e["target"]),
+                 "r": e["rhs"], "ty": e.get("ty")}
+        self.expand_assign(e["target"], value, cls_ctx, out)
 
+    # ------------------------------------------------------------------ var decls
+    def vardecl(self, d, cls_ctx, out):
+        name = d.spelling
+        if d.type.spelling.startswith("FBits"):
+            out.append({"k": "let", "name": name, "ty": {"k": "fbits"}, "init": None})
+            self.local_types[name] = {"k": "fbits"}
+            return
+        ty = self.canon(d.type)
+        if ty is None:
+            for tok in d.get_tokens():
+                if tok.spelling == "Type":
+                    if cls_ctx in TYPE_ALIAS:
+                        ty = t(TYPE_ALIAS[cls_ctx])
+                    break
+        if ty is None:
+            self.report(f"var:{name}@{d.location.line}", "unknown variable type")
+            return
+        kids = [c for c in d.get_children() if c.kind != cindex.CursorKind.TYPE_REF]
+        if not kids:
+            out.append({"k": "let", "name": name, "ty": ty, "init": None})
+            self.local_types[name] = ty
+            return
+        init = self.expr(kids[0], ty, cls_ctx)
+        if init is None:
+            return
+        if init["k"] == "ctor" and len(init["args"]) == 0:
+            out.append({"k": "let", "name": name, "ty": ty, "init": None})
+            self.local_types[name] = ty
+            return
+        if init["k"] == "ctor" and len(init["args"]) == 1 and ty["k"] == "cls" and \
+           self.expr_type(init["args"][0]) and self.expr_type(init["args"][0])["k"] == "cls" and \
+           self.expr_type(init["args"][0])["name"] == ty["name"]:
+            out.append({"k": "let", "name": name, "ty": ty,
+                        "init": {"k": "copy", "e": init["args"][0]}})
+            self.local_types[name] = ty
+            return
+        out.append({"k": "let", "name": name, "ty": ty, "init": init})
+        self.local_types[name] = ty
+
+    # ------------------------------------------------------------------ expr type
     def expr_type(self, e):
-        if e is None: return None
+        if e is None:
+            return None
         k = e["k"]
-        if k == "var": return self.local_types.get(e["name"])
-        if k == "this": return t_cls(e["cls"]) if "cls" in e else None
-        if k in ("lit",): return t_prim(e.get("ty", "i32"))
-        if k == "str": return t_prim("cstr")
+        if k == "var":
+            return self.local_types.get(e["name"])
+        if k == "this":
+            return t_cls(e["cls"]) if e.get("cls") else None
+        if k == "lit":
+            return t(e.get("ty", "i32"))
+        if k == "str":
+            return t("cstr")
         if k == "field":
             obj_ty = self.expr_type(e["obj"])
             if obj_ty is not None and obj_ty["k"] == "cls":
                 for f in self.classes.get(obj_ty["name"], {}).get("fields", []):
                     if f["name"] == e["name"]:
                         return f["ty"]
-                return t_prim("f32")  # GetX-like pseudo handled elsewhere
+                return t("f32")
             return None
-        if k == "index":
-            obj_ty = self.expr_type(e["obj"])
-            if obj_ty is not None and obj_ty["k"] == "cls":
-                for f in self.classes.get(obj_ty["name"], {}).get("fields", []):
-                    if f["name"] in ("mF32", "mU32"):
-                        return f["ty"]["elem"]
-            if obj_ty is not None and obj_ty["k"] == "arr":
-                return obj_ty["elem"]
-            return None
-        if k == "ref": return t_ref(self.expr_type(e["e"]), True) if self.expr_type(e["e"]) else None
+        if k == "lane_get":
+            return t("f32")
+        if k == "ref":
+            inner = self.expr_type(e["e"])
+            return t_ref(inner, True) if inner else None
         if k == "deref":
             inner = self.expr_type(e["e"])
-            return inner["to"] if inner is not None and inner["k"] == "ref" else None
+            if inner is not None and inner["k"] == "ref":
+                return inner["to"]
+            if inner is not None and inner["k"] == "cls":
+                return inner
+            return None
         return e.get("ty")
 
-    def lower_vardecl(self, d, cls_ctx, out):
-        name = d.spelling
-        # union-bitcast helper pattern: FBits b;
-        if d.type.spelling.startswith("FBits"):
-            out.append({"k": "let", "name": name, "ty": {"k": "fbits"}, "init": None})
-            self.local_types[name] = {"k": "fbits"}
-            return
-        ty = self.canon_type(d.type)
-        if ty is None:
-            # class-local Type alias or unknown — try decl context
-            ty = t_cls(cls_ctx) if cls_ctx in TYPE_ALIAS else None
-        if ty is None:
-            self.report_unsupported(f"var:{name}@{d.location.line}", "unknown variable type")
-            return
-        kids = list(d.get_children())
-        # union bitcast pattern: FBits b; b.f = e; ... handled at assign; init:
-        inits = [k for k in kids if k.kind not in (cindex.CursorKind.TYPE_REF, cindex.CursorKind.UNEXPOSED_EXPR)]
-        if not inits:
-            out.append({"k": "let", "name": name, "ty": ty, "init": None})
-            self.local_types[name] = ty
-            return
-        # copy ctor: Vec4 d(a); -> init from single expr of same class
-        if len(inits) == 1 and inits[0].kind == cindex.CursorKind.CXX_CONSTRUCT_EXPR and ty["k"] == "cls":
-            ctor_expr = self.build_expr(inits[0], ty, cls_ctx)
-            if ctor_expr is not None and ctor_expr["k"] == "ctor" and len(ctor_expr["args"]) == 0:
-                # default ctor: zero-init
-                out.append({"k": "let", "name": name, "ty": ty, "init": None})
-                self.local_types[name] = ty
-                return
-            if ctor_expr is not None and ctor_expr["k"] == "ctor" and len(ctor_expr["args"]) == 1 \
-               and self.expr_type(ctor_expr["args"][0]) and self.expr_type(ctor_expr["args"][0])["k"] == "cls" \
-               and self.expr_type(ctor_expr["args"][0])["name"] == ty["name"]:
-                # copy construction
-                out.append({"k": "let", "name": name, "ty": ty,
-                            "init": {"k": "copy", "e": ctor_expr["args"][0]}})
-                self.local_types[name] = ty
-                return
-        init = self.build_expr(inits[0], ty, cls_ctx)
-        if init is None:
-            return
-        out.append({"k": "let", "name": name, "ty": ty, "init": init})
-        self.local_types[name] = ty
-
-    # ------------------------------------------------------------------ decls
+    # ------------------------------------------------------------------ collection
     def collect(self):
         if self.diag_fail:
             for d in self.tu.diagnostics:
                 if d.severity >= cindex.Diagnostic.Error:
-                    print(f"PARSE ERROR: {d.location.file}:{d.location.line} {d.spelling}", file=sys.stderr)
+                    loc = d.location
+                    print(f"PARSE ERROR: {loc.file}:{loc.line} {d.spelling}", file=sys.stderr)
             return False
-        top = self.tu.cursor
         self.local_types = {}
 
-        # pass 1: classes
-        for c in top.walk_preorder():
+        for c in self.tu.cursor.walk_preorder():
             if c.kind == cindex.CursorKind.CLASS_DECL and c.spelling in TARGET_CLASSES and c.is_definition():
-                self.lower_class(c)
+                self.lower_class_fields(c)
             if c.kind == cindex.CursorKind.STRUCT_DECL and c.spelling in TARGET_CLASSES and c.is_definition():
-                self.lower_class(c)
+                self.lower_class_fields(c)
 
-        # pass 2: free functions in battery
-        for c in top.get_children():
-            if c.kind == cindex.CursorKind.FUNCTION_DECL and self.in_source(c):
+        seen = set()
+        for c in self.tu.cursor.walk_preorder():
+            if c.kind == cindex.CursorKind.CXX_METHOD and c.is_definition():
+                parent = c.semantic_parent.spelling if c.semantic_parent else ""
+                if parent in TARGET_CLASSES:
+                    key = (parent, c.spelling, c.location.line)
+                    if key not in seen:
+                        seen.add(key)
+                        self.lower_method(c, parent)
+            if c.kind == cindex.CursorKind.CONSTRUCTOR and c.is_definition():
+                parent = c.semantic_parent.spelling if c.semantic_parent else ""
+                if parent in TARGET_CLASSES:
+                    key = (parent, "<ctor>", c.location.line)
+                    if key not in seen:
+                        seen.add(key)
+                        self.lower_ctor(c, parent)
+
+        for c in self.tu.cursor.walk_preorder():
+            if c.kind == cindex.CursorKind.FUNCTION_DECL and c.is_definition() \
+               and self.in_source(c):
                 self.lower_fun(c)
 
-        # pass 3: drop methods that (transitively) call unsupported things
-        self.prune_unsupported_calls()
+        self.prune()
         return True
 
-    def lower_class(self, c):
+    def lower_class_fields(self, c):
         name = c.spelling
-        cls = {"name": name, "fields": [], "methods": []}
-        self.classes[name] = cls
+        cls = self.classes.setdefault(name, {"name": name, "fields": [], "methods": []})
+        if cls["fields"]:
+            return
         for m in c.get_children():
-            if m.kind == cindex.CursorKind.FIELD_DECL:
-                # anonymous union: descend into union fields
-                if m.type.get_declaration() is not None and \
-                   m.type.get_declaration().kind == cindex.CursorKind.UNION_DECL and m.spelling == "":
-                    for uf in m.type.get_declaration().get_children():
-                        if uf.kind == cindex.CursorKind.FIELD_DECL:
-                            et = self.canon_type(uf.type)
-                            if et is not None and et["k"] == "arr":
-                                cls["fields"].append({"name": uf.spelling, "ty": et})
-                elif m.spelling in ("x", "y", "z", "w"):
-                    cls["fields"].append({"name": m.spelling, "ty": t_prim("f32")})
-            elif m.kind in (cindex.CursorKind.CXX_METHOD, cindex.CursorKind.CXX_CONSTRUCTOR_DECL):
-                self.lower_method(m, name)
-            elif m.kind == cindex.CursorKind.FUNCTION_DECL:
-                # friend operators (operator<< excluded by name)
-                if m.spelling in ("operator*", "operator<<"):
-                    if m.spelling == "operator<<":
-                        self.report_unsupported(f"{name}::operator<<", "stream output — not needed")
-                        continue
-                    self.lower_friend(m, name)
+            if m.kind != cindex.CursorKind.FIELD_DECL and \
+               m.kind != cindex.CursorKind.UNION_DECL:
+                continue
+            if m.spelling in ("x", "y", "z", "w"):
+                cls["fields"].append({"name": m.spelling, "ty": t("f32")})
+            elif m.spelling == "mValue":
+                lane_t = "v128f" if name in ("Vec3", "Vec4") else "v128i"
+                cls["fields"].append({"name": "mValue", "ty": t(lane_t)})
+            elif m.kind == cindex.CursorKind.UNION_DECL:
+                # anonymous union { __m128 mValue; float mF32[4]; } / { __m128i mValue; uint32 mU32[4]; }
+                for uf in m.get_children():
+                    if uf.kind == cindex.CursorKind.FIELD_DECL and uf.spelling == "mValue":
+                        lane_t = "v128f" if name in ("Vec3", "Vec4") else "v128i"
+                        cls["fields"].append({"name": "mValue", "ty": t(lane_t)})
 
     def lower_method(self, m, cls_name):
-        if m.is_invalid_declaration():
+        if m.spelling in ("operator=", "operator new", "operator new[]",
+                          "operator delete", "operator delete[]"):
             return
-        if m.template_kind != cindex.CursorKind.NO_TEMPLATE_KIND if hasattr(m, 'template_kind') else False:
-            return
-        # skip out-of-line (none here), skip explicit-ish defaults
-        if not m.is_definition() and not m.pure_virtual:
-            body_children = list(m.get_children())
-            if not any(k.kind == cindex.CursorKind.COMPOUND_STMT for k in body_children):
+        try:
+            if m.is_defaulted():
                 return
-        # skip deleted/defaulted copies (no body)
-        toks = [t.spelling for t in self.tu.get_tokens(m.extent)]
-        if m.spelling in ("operator=",) and m.is_definition() is False:
-            return
+        except Exception:
+            pass
+        # member templates surface as FUNCTION_TEMPLATE cursors, never plain
+        # CXX_METHOD — nothing to check here in this libclang version
         if not any(k.kind == cindex.CursorKind.COMPOUND_STMT for k in m.get_children()):
-            return  # declaration only or '= default'
-        if m.is_defaulted():
             return
 
-        name = self.method_ir_name(m, cls_name)
         is_static = m.is_static_method()
+        name = self.ir_method_name(m, cls_name)
         params = []
-        if not is_static:
-            params.append({"name": "self", "ty": t_cls(cls_name)})  # implicit receiver
-        for p in m.get_arguments():
-            pt = self.param_type(p.type, cls_name)
-            if pt is None:
-                self.report_unsupported(f"{cls_name}::{name}", f"unmappable param '{p.spelling}'")
-                return
-            params.append({"name": p.spelling or f"arg{len(params)}", "ty": pt})
-        ret = self.canon_type(m.result_type)
-        # ref-returning mutable operator[] handled as indexer set/get pair
-        body = []
         self.local_types = {}
-        for p in params:
-            self.local_types[p["name"]] = p["ty"]
+        if not is_static:
+            params.append({"name": "self", "ty": t_cls(cls_name)})
+            self.local_types["self"] = t_cls(cls_name)
+        for p in m.get_arguments():
+            pt = self.param_ty(p.type, cls_name)
+            if pt is None:
+                self.report(f"{cls_name}::{name}", f"unmappable param '{p.spelling}'")
+                return
+            pname = p.spelling or f"arg{len(params)}"
+            params.append({"name": pname, "ty": pt})
+            self.local_types[pname] = pt
+
+        ret = self.canon(m.result_type)
+        if ret is None and m.result_type.spelling == "Type" and cls_name in TYPE_ALIAS:
+            ret = t(TYPE_ALIAS[cls_name])
+        if ret is None:
+            rt_sp = m.result_type.spelling
+            if "unsigned" in rt_sp:
+                ret = t("u32")
+            elif rt_sp == "int":
+                ret = t("i32")
+        if ret is None:
+            self.report(f"{cls_name}::{name}", f"unmappable return '{m.result_type.spelling}'")
+            return
+
+        body = []
         comp = None
         for k in m.get_children():
             if k.kind == cindex.CursorKind.COMPOUND_STMT:
                 comp = k
-        if comp is None:
-            return
-        self.build_stmt(comp, cls_name, body)
-        if ret is None:
-            # result_type may be 'Type' alias etc.
-            rt_sp = m.result_type.spelling
-            if rt_sp in ("Type",) and cls_name in TYPE_ALIAS:
-                ret = t_cls(TYPE_ALIAS[cls_name])
-            else:
-                self.report_unsupported(f"{cls_name}::{name}", "unmappable return type")
-                return
-        if "self" in params or is_static:
-            pass
-        else:
-            params.insert(0, {"name": "self", "ty": t_cls(cls_name)})
+        self.stmt(comp, cls_name, body)
 
+        if ret["k"] == "ref":
+            ret = t("void")     # compound ops become void mutators
         self.classes[cls_name]["methods"].append({
             "cls": cls_name, "name": name, "static": is_static,
             "params": params, "ret": ret, "body": body,
             "origin": f"{cls_name}::{m.spelling}",
         })
 
-    def lower_friend(self, m, cls_name):
-        # friend operator*(float, Vec4) — lowered as a rewrite rule at call
-        # sites; also emitted as static for completeness if needed
-        return
-
-    def lower_fun(self, c):
-        name = c.spelling
-        if name in ("printf",):
-            return
+    def lower_ctor(self, c, cls_name):
+        try:
+            if c.is_default_constructor() or c.is_copy_constructor():
+                return
+        except Exception:
+            pass
         params = []
         self.local_types = {}
         for p in c.get_arguments():
-            pt = self.canon_type(p.type)
+            pt = self.param_ty(p.type, cls_name)
             if pt is None:
-                if p.type.spelling == "const char *" or "char" in p.type.spelling:
-                    pt = t_prim("cstr")
-                else:
-                    self.report_unsupported(f"fun:{name}", f"unmappable param '{p.spelling}'")
-                    return
-            params.append({"name": p.spelling or f"arg{len(params)}", "ty": pt})
-            self.local_types[p["name"]] = pt
-        ret = self.canon_type(c.result_type)
-        if ret is None and c.result_type.spelling == "void":
-            ret = t_prim("void")
-        if ret is None:
-            if c.result_type.spelling == "unsigned int":
-                ret = t_prim("u32")
-            else:
-                self.report_unsupported(f"fun:{name}", "unmappable return type")
+                self.report(f"{cls_name}::<ctor>", f"unmappable param '{p.spelling}'")
                 return
+            pname = p.spelling or f"arg{len(params)}"
+            params.append({"name": pname, "ty": pt})
+            self.local_types[pname] = pt
+        body = []
+        comp = None
+        for k in c.get_children():
+            if k.kind == cindex.CursorKind.COMPOUND_STMT:
+                comp = k
+        if comp is None:
+            self.report(f"{cls_name}::<ctor>", "no body")
+            return
+        self.stmt(comp, cls_name, body)
+
+        # member initializers (mValue(...)) prepended
+        for k in c.get_children():
+            if k.kind == cindex.CursorKind.COMPOUND_STMT:
+                continue
+            kids = list(k.get_children())
+            if kids and kids[0].kind == cindex.CursorKind.MEMBER_REF and len(kids) > 1:
+                fname = kids[0].spelling
+                if fname == "mValue":
+                    e = self.expr(kids[1], None, cls_name)
+                    if e is not None:
+                        body.insert(0, {"k": "assign",
+                                        "target": {"k": "field",
+                                                   "obj": {"k": "this", "cls": cls_name},
+                                                   "name": fname},
+                                        "value": e})
+        sig = "_".join(ty_show(p["ty"]).replace("const ", "").replace("mut ", "") for p in params) or "default"
+        name = f"ctor@{sig}"
+        self.classes[cls_name]["methods"].append({
+            "cls": cls_name, "name": name, "static": False, "ctor": True,
+            "params": params, "ret": t_cls(cls_name), "body": body,
+            "origin": f"{cls_name}::{cls_name}",
+        })
+
+    def lower_fun(self, c):
+        name = c.spelling
+        params = []
+        self.local_types = {}
+        for p in c.get_arguments():
+            pt = self.canon(p.type)
+            if pt is None:
+                if "char" in p.type.spelling:
+                    pt = t("cstr")
+                elif "unsigned" in p.type.spelling:
+                    pt = t("u32")
+                else:
+                    self.report(f"fun:{name}", f"unmappable param '{p.spelling}'")
+                    return
+            pname = p.spelling or f"arg{len(params)}"
+            params.append({"name": pname, "ty": pt})
+            self.local_types[pname] = pt
+        ret = self.canon(c.result_type)
+        if ret is None and c.result_type.spelling == "void":
+            ret = t("void")
+        if ret is None:
+            self.report(f"fun:{name}", "unmappable return type")
+            return
         body = []
         comp = None
         for k in c.get_children():
@@ -1165,74 +1195,37 @@ class Frontend:
                 comp = k
         if comp is None:
             return
-        self.build_stmt(comp, None, body)
+        self.stmt(comp, None, body)
         self.funs.append({"name": name, "params": params, "ret": ret, "body": body})
 
-    # ------------------------------------------------------------------ union bitcast pattern
-    # BitsOf(float) uses union FBits {float f; uint32 u;} — we recognize the
-    # 'FBits b; b.f = e; b.u' idiom and lower to bitcast ops at assign/expr time.
-    # Implemented by rewriting MEMBER_REF_EXPR on FBits locals in build_expr —
-    # see rewrite_fbits.
-
     # ------------------------------------------------------------------ pruning
-    def method_key(self, cls, name):
-        return f"{cls}::{name}"
+    def call_targets(self, node):
+        found = []
+        def walk(x):
+            if isinstance(x, dict):
+                if x.get("k") in ("call", "meth") and x.get("cls"):
+                    found.append((x["cls"], x["name"]))
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        walk(node)
+        return found
 
-    def collect_call_targets(self, body):
-        targets = []
-        def walk(e):
-            if not isinstance(e, dict):
-                return
-            if e.get("k") == "call" and e.get("cls"):
-                targets.append((e["cls"], e["name"]))
-            if e.get("k") == "meth":
-                targets.append((e["cls"], e["name"]))
-            if e.get("k") == "ctor":
-                pass
-            for v in e.values():
-                walk(v)
-            if isinstance(e, list):
-                pass
-        def walk_stmts(stmts):
-            for s in stmts:
-                walk(s)
-                for v in s.values():
-                    if isinstance(v, list):
-                        for item in v:
-                            if isinstance(item, dict) and "k" in item:
-                                walk(item)
-                                for vv in item.values():
-                                    if isinstance(vv, list):
-                                        for it2 in vv:
-                                            if isinstance(it2, dict):
-                                                walk(it2)
-                    elif isinstance(v, dict):
-                        walk(v)
-                    elif isinstance(v, list):
-                        for item in v:
-                            if isinstance(item, dict):
-                                walk(item)
-                            elif isinstance(item, list):
-                                for it2 in item:
-                                    if isinstance(it2, dict):
-                                        walk(it2)
-        walk_stmts(body)
-        return targets
-
-    def prune_unsupported_calls(self):
-        # build method index
-        self.mindex = {}
+    def prune(self):
+        mindex = {}
         for cls in self.classes.values():
             for m in cls["methods"]:
-                self.mindex[(m["cls"], m["name"])] = m
+                mindex[(m["cls"], m["name"])] = m
         changed = True
         while changed:
             changed = False
-            for (key, m) in list(self.mindex.items()):
-                for (cls, name) in self.collect_call_targets(m["body"]):
-                    if (cls, name) not in self.mindex:
-                        self.report_unsupported(f"{key}", f"calls dropped method {cls}::{name}")
-                        del self.mindex[key]
+            for key, m in list(mindex.items()):
+                for (cls, name) in self.call_targets(m["body"]):
+                    if (cls, name) not in mindex:
+                        self.report(f"{key}", f"calls dropped method {cls}::{name}")
+                        del mindex[key]
                         cls_obj = self.classes.get(m["cls"])
                         if cls_obj:
                             cls_obj["methods"] = [x for x in cls_obj["methods"] if x is not m]
@@ -1244,11 +1237,8 @@ class Frontend:
         classes = []
         for cname in ("Float3", "Float4", "Vec4", "Vec3", "UVec4"):
             if cname in self.classes:
-                cls = self.classes[cname]
-                classes.append({"name": cls["name"],
-                                "fields": cls["fields"],
-                                "methods": cls["methods"]})
-        ir = {"module": "jolt_math", "ir_version": 1,
+                classes.append(self.classes[cname])
+        ir = {"module": "jolt_math", "ir_version": 2, "dialect": "simd",
               "classes": classes, "funs": self.funs}
         with open(out_ir, "w") as f:
             json.dump(ir, f, indent=1)
@@ -1257,7 +1247,7 @@ class Frontend:
                 f.write(f"{u['symbol']}: {u['reason']}\n")
         n_methods = sum(len(c["methods"]) for c in classes)
         print(f"FE OK: {len(classes)} classes, {n_methods} methods, {len(self.funs)} funs, "
-              f"{len(self.unsupported)} unsupported")
+              f"{len(self.unsupported)} unsupported entries")
 
 
 def main():
@@ -1266,6 +1256,7 @@ def main():
     if not fe.collect():
         sys.exit(2)
     fe.emit(out_ir, out_report)
+
 
 if __name__ == "__main__":
     main()

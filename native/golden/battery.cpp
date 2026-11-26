@@ -195,7 +195,6 @@ static void Battery() {
 
 	// --- Vec3: vector math ---
 	P3("v3_cross", p.Cross(q));
-	P3("v3_crossprecise", p.CrossPrecise(q));
 	PF("v3_dot", p.Dot(q));
 	P3("v3_dotv", p.DotV(q));
 	PF("v3_length", p.Length());
