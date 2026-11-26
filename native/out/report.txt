@@ -1,114 +1,61 @@
-call@132: call without resolvable callee
+ret@23: return value failed to lower
+Float4::op_index@i32_c: poisoned body — refused
+ret@28: return value failed to lower
+Float4::op_eq@Float4_c: poisoned body — refused
+ret@33: return value failed to lower
+Float4::op_ne@Float4_c: poisoned body — refused
+assignexpr@132: assignment nested in expression
 stmt:UNEXPOSED_EXPR@132: unhandled statement kind
-call@140: call without resolvable callee
-call@56: call without resolvable callee
-call@57: call without resolvable callee
-call@58: call without resolvable callee
+ret@25: return value failed to lower
+Float3::op_index@i32_c: poisoned body — refused
+ret@30: return value failed to lower
+Float3::op_eq@Float3_c: poisoned body — refused
+ret@35: return value failed to lower
+Float3::op_ne@Float3_c: poisoned body — refused
 binop@135: unknown binary operator
-call@138: call without resolvable callee
+assign@135: assignment failed to lower
+Vec3::SetZ@f32: poisoned body — refused
+assignexpr@138: assignment nested in expression
 stmt:UNEXPOSED_EXPR@138: unhandled statement kind
-call@148: call without resolvable callee
-call@36: call without resolvable callee
-expr:TYPE_REF@92: unhandled expression kind
-call@31: call without resolvable callee
-call@62: call without resolvable callee
-call@78: call without resolvable callee
-call@94: call without resolvable callee
-call@105: call without resolvable callee
-call@121: call without resolvable callee
-call@170: call without resolvable callee
-call@173: call without resolvable callee
-call@191: call without resolvable callee
-call@194: call without resolvable callee
-call@201: call without resolvable callee
-var:is_set@226: unknown variable type
-call@227: call without resolvable callee
-call@253: call without resolvable callee
-call@274: call without resolvable callee
-call@295: call without resolvable callee
-call@319: call without resolvable callee
-call@336: call without resolvable callee
-call@339: call without resolvable callee
+refcast@94: pointer cast between lane types
+ret@94: return value failed to lower
+UVec4::sLoadInt@mut u32: poisoned body — refused
+ret@105: return value failed to lower
+UVec4::sLoadInt4@mut u32: poisoned body — refused
+ret@121: return value failed to lower
+UVec4::sLoadInt4Aligned@mut u32: poisoned body — refused
+assignexpr@339: assignment nested in expression
 stmt:UNEXPOSED_EXPR@339: unhandled statement kind
-call@342: call without resolvable callee
+assignexpr@342: assignment nested in expression
 stmt:UNEXPOSED_EXPR@342: unhandled statement kind
-call@344: call without resolvable callee
-call@361: call without resolvable callee
-call@364: call without resolvable callee
-call@371: call without resolvable callee
-call@410: call without resolvable callee
-call@449: call without resolvable callee
-call@465: call without resolvable callee
-call@481: call without resolvable callee
-call@497: call without resolvable callee
-call@513: call without resolvable callee
-expr:TYPE_REF@530: unhandled expression kind
-expr:TYPE_REF@587: unhandled expression kind
-expr:TYPE_REF@602: unhandled expression kind
-call@737: call without resolvable callee
-call@760: call without resolvable callee
-call@795: call without resolvable callee
-call@798: call without resolvable callee
-call@817: call without resolvable callee
-call@820: call without resolvable callee
-call@839: call without resolvable callee
-call@842: call without resolvable callee
-call@861: call without resolvable callee
-call@864: call without resolvable callee
-call@897: call without resolvable callee
-Vec3::sFixW@v128f: unmappable return 'Vec3::Type'
-sse:shuffle@64: non-constant imm
-call@128: call without resolvable callee
-call@144: call without resolvable callee
-call@180: call without resolvable callee
-call@186: call without resolvable callee
-call@206: call without resolvable callee
-call@225: call without resolvable callee
-call@231: call without resolvable callee
-call@256: call without resolvable callee
-call@281: call without resolvable callee
-call@306: call without resolvable callee
-call@331: call without resolvable callee
-call@372: call without resolvable callee
-var:is_set@382: unknown variable type
-call@384: call without resolvable callee
-call@414: call without resolvable callee
-call@432: call without resolvable callee
-call@450: call without resolvable callee
-call@467: call without resolvable callee
-call@468: call without resolvable callee
-stmt:UNEXPOSED_EXPR@468: unhandled statement kind
-call@469: call without resolvable callee
-call@487: call without resolvable callee
-call@492: call without resolvable callee
-call@503: call without resolvable callee
-call@521: call without resolvable callee
-call@555: call without resolvable callee
-call@633: call without resolvable callee
-call@672: call without resolvable callee
-call@706: call without resolvable callee
-call@746: call without resolvable callee
-call@764: call without resolvable callee
-call@780: call without resolvable callee
-call@796: call without resolvable callee
-call@824: call without resolvable callee
-call@840: call without resolvable callee
-call@851: call without resolvable callee
-sse:shuffle@858: non-constant imm
-sse:shuffle@860: non-constant imm
-call@863: call without resolvable callee
-call@895: call without resolvable callee
-call@933: call without resolvable callee
-call@959: call without resolvable callee
-if@1023: unresolvable if shape
-call@1080: call without resolvable callee
-expr:TYPE_REF@1097: unhandled expression kind
-call@1107: call without resolvable callee
-call@1108: call without resolvable callee
+var:mul@541: unknown variable type
+var:sum@542: unknown variable type
+UVec4::DotV@UVec4_c: poisoned body — refused
+var:mul@566: unknown variable type
+var:sum@567: unknown variable type
+UVec4::Dot@UVec4_c: poisoned body — refused
+expr:ALIGNED_ATTR@871: unhandled expression kind
+var:sFourMinusXShuffle@871: initializer failed to lower
+ret@882: return value failed to lower
+UVec4::ShiftComponents4Minus@i32_c: poisoned body — refused
+swizzle@895: unresolvable swizzle
+ret@895: return value failed to lower
+Vec3::CrossPrecise@Vec3_c: poisoned body — refused
+swizzle@1059: unresolvable swizzle
+var:t@1059: initializer failed to lower
+swizzle@1061: unresolvable swizzle
+stmt:UNEXPOSED_EXPR@1061: unhandled statement kind
+Vec3::StoreFloat3@mut Float3_c: poisoned body — refused
+swizzle@1107: unresolvable swizzle
+var:v@1107: initializer failed to lower
+swizzle@1108: unresolvable swizzle
 stmt:UNEXPOSED_EXPR@1108: unhandled statement kind
-call@1114: call without resolvable callee
-call@1115: call without resolvable callee
+Vec3::ReduceMin@c: poisoned body — refused
+swizzle@1114: unresolvable swizzle
+var:v@1114: initializer failed to lower
+swizzle@1115: unresolvable swizzle
 stmt:UNEXPOSED_EXPR@1115: unhandled statement kind
+Vec3::ReduceMax@c: poisoned body — refused
 var:zero@1125: unknown variable type
 var:neg@1126: unknown variable type
 var:perp_x@1127: unknown variable type
@@ -118,287 +65,58 @@ var:xx@1132: unknown variable type
 var:yy@1133: unknown variable type
 var:zz@1134: unknown variable type
 var:x_gt_y@1135: unknown variable type
-var:result@1141: unknown variable type
+var:result@1139: unknown variable type
 var:len@1145: unknown variable type
-call@1146: call without resolvable callee
-call@1169: call without resolvable callee
-call@1206: call without resolvable callee
+Vec3::GetNormalizedPerpendicular@c: poisoned body — refused
+assignexpr@1212: assignment nested in expression
+stmt:UNEXPOSED_EXPR@1212: unhandled statement kind
 expr:SWITCH_STMT@1220: unhandled expression kind
 stmt:SWITCH_STMT@1220: unhandled statement kind
-call@1246: call without resolvable callee
-if@1253: unresolvable if shape
+assignexpr@1254: assignment nested in expression
+stmt:UNEXPOSED_EXPR@1254: unhandled statement kind
 expr:SWITCH_STMT@1257: unhandled expression kind
 stmt:SWITCH_STMT@1257: unhandled statement kind
-call@1268: call without resolvable callee
-call@84: call without resolvable callee
-call@100: call without resolvable callee
-call@126: call without resolvable callee
-call@142: call without resolvable callee
-call@212: call without resolvable callee
-call@232: call without resolvable callee
-call@238: call without resolvable callee
-call@261: call without resolvable callee
-call@284: call without resolvable callee
-call@307: call without resolvable callee
-call@330: call without resolvable callee
-call@369: call without resolvable callee
-var:is_set@378: unknown variable type
-call@379: call without resolvable callee
-call@405: call without resolvable callee
-call@423: call without resolvable callee
-call@441: call without resolvable callee
-call@461: call without resolvable callee
-call@462: call without resolvable callee
+assignexpr@462: assignment nested in expression
 stmt:UNEXPOSED_EXPR@462: unhandled statement kind
-call@463: call without resolvable callee
+assignexpr@463: assignment nested in expression
 stmt:UNEXPOSED_EXPR@463: unhandled statement kind
+assignexpr@469: assignment nested in expression
 stmt:UNEXPOSED_EXPR@469: unhandled statement kind
-call@470: call without resolvable callee
+assignexpr@470: assignment nested in expression
 stmt:UNEXPOSED_EXPR@470: unhandled statement kind
-call@475: call without resolvable callee
-call@476: call without resolvable callee
+assignexpr@476: assignment nested in expression
 stmt:UNEXPOSED_EXPR@476: unhandled statement kind
-call@477: call without resolvable callee
+assignexpr@477: assignment nested in expression
 stmt:UNEXPOSED_EXPR@477: unhandled statement kind
-call@485: call without resolvable callee
-call@486: call without resolvable callee
+assignexpr@486: assignment nested in expression
 stmt:UNEXPOSED_EXPR@486: unhandled statement kind
+assignexpr@487: assignment nested in expression
 stmt:UNEXPOSED_EXPR@487: unhandled statement kind
-call@493: call without resolvable callee
+assignexpr@493: assignment nested in expression
 stmt:UNEXPOSED_EXPR@493: unhandled statement kind
-call@494: call without resolvable callee
+assignexpr@494: assignment nested in expression
 stmt:UNEXPOSED_EXPR@494: unhandled statement kind
-call@499: call without resolvable callee
-call@500: call without resolvable callee
+assignexpr@500: assignment nested in expression
 stmt:UNEXPOSED_EXPR@500: unhandled statement kind
-call@501: call without resolvable callee
+assignexpr@501: assignment nested in expression
 stmt:UNEXPOSED_EXPR@501: unhandled statement kind
-call@506: call without resolvable callee
-call@511: call without resolvable callee
-call@546: call without resolvable callee
-call@567: call without resolvable callee
-call@605: call without resolvable callee
-call@674: call without resolvable callee
-call@713: call without resolvable callee
-call@747: call without resolvable callee
-call@786: call without resolvable callee
-call@807: call without resolvable callee
-call@823: call without resolvable callee
-call@855: call without resolvable callee
-call@871: call without resolvable callee
-call@887: call without resolvable callee
-call@903: call without resolvable callee
-call@919: call without resolvable callee
-call@935: call without resolvable callee
-call@936: call without resolvable callee
+assignexpr@936: assignment nested in expression
 stmt:UNEXPOSED_EXPR@936: unhandled statement kind
-call@939: call without resolvable callee
-call@945: call without resolvable callee
-call@946: call without resolvable callee
+assignexpr@946: assignment nested in expression
 stmt:UNEXPOSED_EXPR@946: unhandled statement kind
-call@949: call without resolvable callee
-call@957: call without resolvable callee
-call@973: call without resolvable callee
-call@984: call without resolvable callee
-call@1009: call without resolvable callee
-call@1035: call without resolvable callee
-call@1057: call without resolvable callee
-call@1105: call without resolvable callee
-expr:TYPE_REF@1122: unhandled expression kind
-call@1154: call without resolvable callee
-call@1155: call without resolvable callee
+assignexpr@1155: assignment nested in expression
 stmt:UNEXPOSED_EXPR@1155: unhandled statement kind
-call@1165: call without resolvable callee
-call@1166: call without resolvable callee
+assignexpr@1166: assignment nested in expression
 stmt:UNEXPOSED_EXPR@1166: unhandled statement kind
-call@1178: call without resolvable callee
-call@1181: call without resolvable callee
-call@1197: call without resolvable callee
-call@1201: call without resolvable callee
-call@1203: call without resolvable callee
-call@1221: call without resolvable callee
-call@1222: call without resolvable callee
-call@1225: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1225: unhandled statement kind
-call@1226: call without resolvable callee
-call@1229: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1229: unhandled statement kind
-call@1230: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1230: unhandled statement kind
-call@1240: call without resolvable callee
-call@1243: call without resolvable callee
-call@1250: call without resolvable callee
-call@1255: call without resolvable callee
-call@1260: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1260: unhandled statement kind
-call@1263: call without resolvable callee
-call@1273: call without resolvable callee
-call@1276: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1276: unhandled statement kind
-call@1279: call without resolvable callee
-call@1280: call without resolvable callee
-call@1283: call without resolvable callee
-call@1287: call without resolvable callee
-call@1288: call without resolvable callee
-call@1289: call without resolvable callee
-call@1292: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1292: unhandled statement kind
-call@1295: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1295: unhandled statement kind
-call@1298: call without resolvable callee
-call@1314: call without resolvable callee
-call@1318: call without resolvable callee
-call@1322: call without resolvable callee
-call@1323: call without resolvable callee
-call@1326: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1326: unhandled statement kind
-call@1327: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1327: unhandled statement kind
-call@1330: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1330: unhandled statement kind
-call@1331: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1331: unhandled statement kind
-call@1334: call without resolvable callee
-call@1335: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1335: unhandled statement kind
-call@1338: call without resolvable callee
-call@1346: call without resolvable callee
-call@1347: call without resolvable callee
-call@1350: call without resolvable callee
-call@1351: call without resolvable callee
-call@1354: call without resolvable callee
-call@1355: call without resolvable callee
-call@1356: call without resolvable callee
-call@1357: call without resolvable callee
-call@1360: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1360: unhandled statement kind
-call@1370: call without resolvable callee
-stmt:UNEXPOSED_EXPR@1370: unhandled statement kind
-call@1371: call without resolvable callee
-call@1383: call without resolvable callee
+assignexpr@1389: assignment nested in expression
+stmt:UNEXPOSED_EXPR@1389: unhandled statement kind
 expr:SWITCH_STMT@1397: unhandled expression kind
 stmt:SWITCH_STMT@1397: unhandled statement kind
-call@1428: call without resolvable callee
-if@1435: unresolvable if shape
+assignexpr@1436: assignment nested in expression
+stmt:UNEXPOSED_EXPR@1436: unhandled statement kind
 expr:SWITCH_STMT@1439: unhandled expression kind
 stmt:SWITCH_STMT@1439: unhandled statement kind
-call@1454: call without resolvable callee
-call@66: call without resolvable callee
-call@67: call without resolvable callee
-call@68: call without resolvable callee
-call@69: call without resolvable callee
-call@70: call without resolvable callee
-call@71: call without resolvable callee
-call@72: call without resolvable callee
-call@80: call without resolvable callee
-call@81: call without resolvable callee
-call@82: call without resolvable callee
-call@89: call without resolvable callee
-call@90: call without resolvable callee
-call@91: call without resolvable callee
-call@92: call without resolvable callee
-call@95: call without resolvable callee
-stmt:UNEXPOSED_EXPR@95: unhandled statement kind
-call@96: call without resolvable callee
-stmt:UNEXPOSED_EXPR@96: unhandled statement kind
-call@98: call without resolvable callee
-stmt:UNEXPOSED_EXPR@98: unhandled statement kind
-stmt:UNEXPOSED_EXPR@100: unhandled statement kind
-call@102: call without resolvable callee
-stmt:UNEXPOSED_EXPR@102: unhandled statement kind
-call@104: call without resolvable callee
-call@106: call without resolvable callee
-call@107: call without resolvable callee
-call@108: call without resolvable callee
-call@111: call without resolvable callee
-stmt:UNEXPOSED_EXPR@111: unhandled statement kind
-call@112: call without resolvable callee
-stmt:UNEXPOSED_EXPR@112: unhandled statement kind
-call@113: call without resolvable callee
-stmt:UNEXPOSED_EXPR@113: unhandled statement kind
-call@120: call without resolvable callee
-stmt:UNEXPOSED_EXPR@121: unhandled statement kind
-stmt:UNEXPOSED_EXPR@126: unhandled statement kind
-call@127: call without resolvable callee
-stmt:UNEXPOSED_EXPR@127: unhandled statement kind
-call@131: call without resolvable callee
-call@133: call without resolvable callee
-call@135: call without resolvable callee
-call@136: call without resolvable callee
 stmt:UNEXPOSED_EXPR@136: unhandled statement kind
 stmt:UNEXPOSED_EXPR@137: unhandled statement kind
-stmt:UNEXPOSED_EXPR@142: unhandled statement kind
-call@143: call without resolvable callee
-stmt:UNEXPOSED_EXPR@143: unhandled statement kind
-stmt:UNEXPOSED_EXPR@144: unhandled statement kind
-call@145: call without resolvable callee
-stmt:UNEXPOSED_EXPR@145: unhandled statement kind
-call@146: call without resolvable callee
-stmt:UNEXPOSED_EXPR@146: unhandled statement kind
-call@147: call without resolvable callee
-stmt:UNEXPOSED_EXPR@147: unhandled statement kind
-stmt:UNEXPOSED_EXPR@148: unhandled statement kind
-call@149: call without resolvable callee
-stmt:UNEXPOSED_EXPR@149: unhandled statement kind
-call@152: call without resolvable callee
-stmt:UNEXPOSED_EXPR@152: unhandled statement kind
-call@153: call without resolvable callee
-stmt:UNEXPOSED_EXPR@153: unhandled statement kind
-call@154: call without resolvable callee
-stmt:UNEXPOSED_EXPR@154: unhandled statement kind
-call@155: call without resolvable callee
-stmt:UNEXPOSED_EXPR@155: unhandled statement kind
-call@158: call without resolvable callee
-stmt:UNEXPOSED_EXPR@158: unhandled statement kind
-call@168: call without resolvable callee
-call@169: call without resolvable callee
-call@171: call without resolvable callee
-call@172: call without resolvable callee
-expr:TYPE_REF@172: unhandled expression kind
-stmt:UNEXPOSED_EXPR@172: unhandled statement kind
-call@177: call without resolvable callee
-stmt:UNEXPOSED_EXPR@180: unhandled statement kind
-call@181: call without resolvable callee
-stmt:UNEXPOSED_EXPR@181: unhandled statement kind
-call@183: call without resolvable callee
-stmt:UNEXPOSED_EXPR@183: unhandled statement kind
-call@187: call without resolvable callee
-call@188: call without resolvable callee
-call@189: call without resolvable callee
-call@192: call without resolvable callee
-stmt:UNEXPOSED_EXPR@192: unhandled statement kind
-call@193: call without resolvable callee
-stmt:UNEXPOSED_EXPR@193: unhandled statement kind
-call@197: call without resolvable callee
-stmt:UNEXPOSED_EXPR@197: unhandled statement kind
-call@198: call without resolvable callee
-call@199: call without resolvable callee
-stmt:UNEXPOSED_EXPR@199: unhandled statement kind
-call@205: call without resolvable callee
-call@207: call without resolvable callee
-call@214: call without resolvable callee
-stmt:UNEXPOSED_EXPR@214: unhandled statement kind
-call@215: call without resolvable callee
-stmt:UNEXPOSED_EXPR@215: unhandled statement kind
-call@216: call without resolvable callee
-stmt:UNEXPOSED_EXPR@216: unhandled statement kind
-call@217: call without resolvable callee
-stmt:UNEXPOSED_EXPR@217: unhandled statement kind
-call@218: call without resolvable callee
-stmt:UNEXPOSED_EXPR@218: unhandled statement kind
-call@219: call without resolvable callee
-stmt:UNEXPOSED_EXPR@219: unhandled statement kind
-call@220: call without resolvable callee
-stmt:UNEXPOSED_EXPR@220: unhandled statement kind
-call@222: call without resolvable callee
-stmt:UNEXPOSED_EXPR@222: unhandled statement kind
-call@224: call without resolvable callee
-call@226: call without resolvable callee
-stmt:UNEXPOSED_EXPR@226: unhandled statement kind
-('Vec4', 'sSort4@Vec4_UVec4'): calls dropped method Vec4::Swizzle
-('Vec4', 'sSort4Reverse@Vec4_UVec4'): calls dropped method Vec4::Swizzle
-('Vec4', 'SinCos@Vec4_Vec4'): calls dropped method UVec4::LogicalShiftLeft
-('Vec4', 'Tan'): calls dropped method UVec4::LogicalShiftLeft
-('Vec4', 'sATan2@Vec4_Vec4'): calls dropped method UVec4::ArithmeticShiftRight
-('Vec3', 'SetComponent@u32_f32'): calls dropped method Vec3::sFixW@v128f
-('Vec3', 'StoreFloat3@mut Float3'): calls dropped method Vec3::Swizzle
+('Vec3', 'sUnitSpherical@f32_f32'): calls dropped method Vec4::SinCos@Vec4_Vec4_c
+('Vec3', 'sDecompressUnitVector@u32'): calls dropped method Vec3::SetZ@f32

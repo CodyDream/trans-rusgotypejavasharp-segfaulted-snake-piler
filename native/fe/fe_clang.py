@@ -103,6 +103,8 @@ SSE_TABLE = {
     "_mm_sub_epi32":   ("isub", 2, "v128i"),
     "_mm_min_epi32":   ("imin", 2, "v128i"),
     "_mm_max_epi32":   ("imax", 2, "v128i"),
+    "_mm_min_epu32":   ("umin", 2, "v128i"),
+    "_mm_max_epu32":   ("umax", 2, "v128i"),
     "_mm_and_si128":   ("ibitand", 2, "v128i"),
     "_mm_or_si128":    ("ibitor", 2, "v128i"),
     "_mm_xor_si128":   ("ibitxor", 2, "v128i"),
@@ -118,6 +120,9 @@ SSE_TABLE = {
     "_mm_cmplt_epi32": ("icmp_lt", 2, "v128i"),
     "_mm_slli_epi32":  ("slli", 2, "v128i"),
     "_mm_srli_epi32":  ("srli", 2, "v128i"),
+    "_mm_unpacklo_epi16": ("iunpacklo", 2, "v128i"),
+    "_mm_unpackhi_epi16": ("iunpackhi", 2, "v128i"),
+    "_mm_shuffle_epi8": ("ishuffle", 2, "v128i"),
     "_mm_cvtsi128_si32": ("cvt32", 1, "i32"),
 }
 
@@ -143,8 +148,8 @@ class Frontend:
         self.reported = set()
         self.index = cindex.Index.create()
         shim = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sse_shim.h")
-        args = ["-std=c++17", "-DNDEBUG", "-ffp-contract=off", f"-I{incdir}",
-                "-include", shim]
+        args = ["-std=c++17", "-DNDEBUG", "-ffp-contract=off", "-msse4.1",
+                f"-I{incdir}", "-include", shim]
         for inc in GXX_INCLUDES:
             args.append(f"-isystem{inc}")
         self.tu = self.index.parse(source, args=args)
@@ -153,11 +158,19 @@ class Frontend:
         self.classes = {}
         self.funs = []
         self.local_types = {}
+        self.poisoned = False
+        self._file_cache = {}
 
     def report(self, sym, reason):
         if sym not in self.reported:
             self.reported.add(sym)
             self.unsupported.append({"symbol": sym, "reason": reason})
+
+    def poison(self, sym, reason):
+        """A semantic drop that would silently corrupt codegen — the whole
+        function is refused."""
+        self.report(sym, reason)
+        self.poisoned = True
 
     def in_source(self, cur):
         f = cur.location.file
@@ -243,18 +256,67 @@ class Frontend:
     # ------------------------------------------------------------------ tokens
     def spelling_of(self, cur):
         toks = list(cur.get_tokens())
-        return toks[0].spelling if toks else ""
+        sp = toks[0].spelling if toks else ""
+        if sp:
+            return sp
+        # macro-expanded literals report empty token spellings — slice the file
+        try:
+            f = cur.location.file
+            if f is not None:
+                path = str(f.name)
+                if path not in self._file_cache:
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        self._file_cache[path] = fh.read()
+                text = self._file_cache[path]
+                return text[cur.extent.start.offset:cur.extent.end.offset].strip()
+        except Exception:
+            pass
+        return ""
 
     def op_token(self, cur, cands):
+        """Pick the operator: depth-0 tokens only (sub-expressions are nested
+        in parens/brackets), then candidate priority order."""
+        depth = 0
+        found = []
         for tk in cur.get_tokens():
-            if tk.spelling in cands:
-                return tk.spelling
+            sp = tk.spelling
+            if sp in ("(", "["):
+                depth += 1
+            elif sp in (")", "]"):
+                depth -= 1
+            elif depth == 0 and sp in cands:
+                found.append(sp)
+        for cand in cands:
+            if cand in found:
+                return cand
         return None
 
     # ------------------------------------------------------------------ const eval
     def const_eval_int(self, cur):
+        # macro-invocation extents have no usable tokens — evaluate
+        # _MM_SHUFFLE(z, y, x, w) straight from the source text
+        try:
+            sp = self.spelling_of(cur)
+            if "_MM_SHUFFLE" in sp:
+                import re
+                nums = re.findall(r"-?\d+", sp)
+                if len(nums) >= 4:
+                    z, y, x, w = (int(n) for n in nums[:4])
+                    return (z << 6) | (y << 4) | (x << 2) | w
+        except Exception:
+            pass
+        try:
+            return self._const_eval_int(cur)
+        except Exception:
+            return None
+
+    def _const_eval_int(self, cur):
         cur = self.strip(cur)
         k = cur.kind
+        if k in (cindex.CursorKind.CSTYLE_CAST_EXPR, cindex.CursorKind.CXX_STATIC_CAST_EXPR,
+                 cindex.CursorKind.CXX_FUNCTIONAL_CAST_EXPR):
+            kids = list(cur.get_children())
+            return self._const_eval_int(kids[0]) if kids else None
         if k == cindex.CursorKind.INTEGER_LITERAL:
             sp = self.spelling_of(cur).lower().rstrip("ul")
             if sp.startswith("0x"):
@@ -293,9 +355,14 @@ class Frontend:
             cur = kids[0]
         return cur
 
-    def callee_of(self, cur):
+    def callee_of(self, cur, depth=0):
         """Callee decl + its ref cursor for a CALL_EXPR (clang 18 style).
-        Builtins hide their DECL_REF_EXPR under UNEXPOSED_EXPR wrappers."""
+        Constructor calls carry the callee on the CALL_EXPR itself; builtin
+        calls hide their DECL_REF_EXPR under UNEXPOSED_EXPR wrappers; implicit
+        conversions wrap the real ctor call one level deeper.
+        Returns (decl, ref_cursor-or-None)."""
+        if depth > 3:
+            return None, None
         for k in cur.get_children():
             ref = k.referenced
             if ref is not None and \
@@ -311,15 +378,30 @@ class Frontend:
                        ref2.kind in (cindex.CursorKind.FUNCTION_DECL, cindex.CursorKind.CXX_METHOD,
                                      cindex.CursorKind.FUNCTION_TEMPLATE, cindex.CursorKind.CONSTRUCTOR):
                         return ref2, k2
+        # constructor calls with no explicit callee child (spelling == class)
+        ref = cur.referenced
+        if ref is not None and ref.kind == cindex.CursorKind.CONSTRUCTOR and \
+           cur.spelling == ref.semantic_parent.spelling:
+            return ref, None
+        # last resort: descend into nested call wrappers
+        for k in cur.get_children():
+            if k.kind == cindex.CursorKind.CALL_EXPR:
+                r2, k2 = self.callee_of(k, depth + 1)
+                if r2 is not None:
+                    return r2, k2
         return None, None
 
-    def call_args(self, cur, callee_ref):
+    def call_args(self, cur, callee_ref, skip_types=False, callee=None):
         args = []
         for k in cur.get_children():
-            if k == callee_ref:
+            if callee_ref is not None and (k == callee_ref or
+                    (k.referenced is not None and callee_ref.referenced is not None
+                     and k.referenced == callee_ref.referenced)):
                 continue
-            if k.referenced is not None and callee_ref.referenced is not None \
-               and k.referenced == callee_ref.referenced:
+            if callee is not None and k.referenced is not None and k.referenced == callee:
+                continue
+            # constructor calls: TYPE_REFs are conversion remnants, not arguments
+            if (callee_ref is None or skip_types) and k.kind == cindex.CursorKind.TYPE_REF:
                 continue
             args.append(k)
         return args
@@ -337,6 +419,8 @@ class Frontend:
 
         if kind == cindex.CursorKind.INTEGER_LITERAL:
             sp = self.spelling_of(cur)
+            if not sp:
+                sp = "0"      # disabled-macro remnants have no tokens
             if want is not None and want["k"] == "f32":
                 return {"k": "lit", "ty": "f32", "sp": sp.rstrip("ul") + ".0"}
             if want is not None and want["k"] == "u32":
@@ -344,7 +428,10 @@ class Frontend:
             return {"k": "lit", "ty": "i32", "sp": sp}
 
         if kind == cindex.CursorKind.STRING_LITERAL:
-            return {"k": "str", "v": self.spelling_of(cur)}
+            raw = self.spelling_of(cur)
+            if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+                raw = raw[1:-1]
+            return {"k": "str", "v": raw}
 
         if kind == cindex.CursorKind.CXX_BOOL_LITERAL_EXPR:
             toks = [tk.spelling for tk in cur.get_tokens()]
@@ -439,11 +526,15 @@ class Frontend:
         if kind in (cindex.CursorKind.CXX_STATIC_CAST_EXPR, cindex.CursorKind.CSTYLE_CAST_EXPR,
                     cindex.CursorKind.CXX_FUNCTIONAL_CAST_EXPR, cindex.CursorKind.CXX_CONST_CAST_EXPR,
                     cindex.CursorKind.CXX_REINTERPRET_CAST_EXPR):
-            kids = list(cur.get_children())
+            to_ty = self.canon(cur.type)
+            if to_ty is not None and to_ty["k"] == "ref":
+                # pointer reinterpretation across lane types — rung 2
+                self.poison(f"refcast@{cur.location.line}", "pointer cast between lane types")
+                return None
+            kids = [k for k in cur.get_children() if k.kind != cindex.CursorKind.TYPE_REF]
             if not kids:
                 return None
             inner = self.expr(kids[0], None, cls_ctx)
-            to_ty = self.canon(cur.type)
             if inner is None or to_ty is None:
                 return None
             return {"k": "cast", "e": inner, "to": to_ty}
@@ -460,7 +551,15 @@ class Frontend:
             return {"k": "arrlit", "elems": elems, "ty": arr_t}
 
         if kind == cindex.CursorKind.CALL_EXPR:
-            return self.call(cur, cls_ctx)
+            e = self.call(cur, cls_ctx)
+            if e is None:
+                return None
+            if e["k"] == "assignexpr":
+                # assignment expressions are only valid as whole statements;
+                # nested in an expression (a = b = c) -> unsupported here
+                self.report(f"assignexpr@{cur.location.line}", "assignment nested in expression")
+                return None
+            return e
 
         self.report(f"expr:{kind.name}@{cur.location.line}", "unhandled expression kind")
         return None
@@ -495,7 +594,7 @@ class Frontend:
                 return None
             args = []
             mparams = list(callee.get_arguments())
-            for i, a in enumerate(self.call_args(cur, callee_ref)):
+            for i, a in enumerate(self.call_args(cur, callee_ref, skip_types=True)):
                 w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
                 e = self.expr(a, w, cls_ctx)
                 if e is None:
@@ -504,6 +603,36 @@ class Frontend:
             return {"k": "ctor", "cls": cls_name, "args": args, "nargs": len(args)}
 
         name = callee.spelling
+
+        # member template Swizzle<X, Y, Z, W>() -> shuffle + 1-arg ctor
+        if name == "Swizzle" and callee.kind == cindex.CursorKind.CXX_METHOD:
+            cls_name = callee.semantic_parent.spelling
+            toks = [tk.spelling for tk in cur.get_tokens()]
+            if "<" in toks and ">" in toks:
+                ids = toks[toks.index("<") + 1:toks.index(">")]
+                tbl = {"SWIZZLE_X": 0, "SWIZZLE_Y": 1, "SWIZZLE_Z": 2, "SWIZZLE_W": 3,
+                       "SWIZZLE_UNUSED": 0}
+                vals = [tbl.get(tk) for tk in ids if tk != ","]
+                if len(vals) == 4 and all(v is not None for v in vals):
+                    X, Y, Z, W = vals
+                    imm = (W << 6) | (Z << 4) | (Y << 2) | X
+                    base_c = None
+                    for k in callee_ref.get_children():
+                        ts = k.type.spelling or "" if k.type else ""
+                        if k.kind == cindex.CursorKind.CXX_THIS_EXPR or "Vec" in ts:
+                            base_c = k
+                            break
+                    obj = self.expr(base_c, None, cls_ctx) if base_c is not None \
+                        else {"k": "this", "cls": cls_name}
+                    if obj is not None and obj.get("k") != "field":
+                        obj = {"k": "field", "obj": obj, "name": "mValue"}
+                    lane_t = "v128i" if cls_name == "UVec4" else "v128f"
+                    sop = "shufflei" if cls_name == "UVec4" else "shuffle"
+                    shuf = {"k": "simd", "name": sop, "args": [obj, obj],
+                            "imm": imm, "ty": t(lane_t)}
+                    return {"k": "ctor", "cls": cls_name, "args": [shuf], "nargs": 1}
+            self.poison(f"swizzle@{cur.location.line}", "unresolvable swizzle")
+            return None
 
         # built-in copy assignment surfaces as an overloaded operator= call
         if name == "operator=" and callee.kind == cindex.CursorKind.CXX_METHOD and \
@@ -569,8 +698,9 @@ class Frontend:
                 ret_ty = t(rk)
             return {"k": "simd", "name": opname, "args": args, "ty": ret_ty}
 
-        if name in ("min", "max", "abs", "sqrt", "sqrtf", "fabs", "fabsf", "Sqrt",
-                    "isnan", "signbit", "CountTrailingZeros"):
+        if callee.kind == cindex.CursorKind.FUNCTION_DECL and \
+           name in ("min", "max", "abs", "sqrt", "sqrtf", "fabs", "fabsf", "Sqrt",
+                    "isnan", "signbit", "CountTrailingZeros", "CountBits"):
             args = []
             for a in self.call_args(cur, callee_ref):
                 e = self.expr(a, None, cls_ctx)
@@ -587,7 +717,8 @@ class Frontend:
                         "ty": self.canon(cur.type)}
             iname = {"abs": "abs", "fabs": "abs", "fabsf": "abs", "sqrt": "sqrt",
                      "sqrtf": "sqrt", "Sqrt": "sqrt", "isnan": "is_nan",
-                     "signbit": "signbit", "CountTrailingZeros": "ctz"}[name]
+                     "signbit": "signbit", "CountTrailingZeros": "ctz",
+                     "CountBits": "popcnt"}[name]
             return {"k": "intrinsic", "name": iname, "args": args, "ty": self.canon(cur.type)}
 
         # class methods: static via DECL_REF_EXPR; instance via MEMBER_REF_EXPR base
@@ -595,37 +726,60 @@ class Frontend:
            callee.semantic_parent.spelling in TARGET_CLASSES:
             cls_name = callee.semantic_parent.spelling
             ret = self.canon(callee.result_type)
-            if ret is None and callee.result_type.spelling == "Type" and cls_name in TYPE_ALIAS:
+            if ret is None and (callee.result_type.spelling == "Type" or callee.result_type.spelling.endswith("::Type")) and cls_name in TYPE_ALIAS:
                 ret = t(TYPE_ALIAS[cls_name])
             if ret is None and "unsigned" in callee.result_type.spelling:
                 ret = t("u32")
             mparams = list(callee.get_arguments())
             acs = self.call_args(cur, callee_ref)
-            if callee.is_static_method() or callee_ref.kind == cindex.CursorKind.DECL_REF_EXPR:
-                # static call (Vec4::sEquals(...)) — possibly via DECL_REF_EXPR
+            if callee.is_static_method():
                 args = []
-                for i, a in enumerate(acs):
-                    w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
+                for i in range(len(mparams)):
+                    if i < len(acs):
+                        a = acs[i]
+                    else:
+                        defaults = list(mparams[i].get_children())
+                        if not defaults:
+                            break
+                        a = defaults[0]      # materialized default arg
+                    w = self.param_ty(mparams[i].type, cls_name)
                     e = self.expr(a, w, cls_ctx)
                     if e is None:
                         return None
                     args.append(e)
                 return {"k": "call", "cls": cls_name,
                         "name": self.ir_method_name(callee, cls_name), "args": args, "ret": ret}
-            # instance call: object = base of the MEMBER_REF_EXPR callee
-            base_c = None
-            for k in callee_ref.get_children():
-                if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF):
-                    base_c = k
-                    break
-            if base_c is None:
-                return None
-            obj = self.expr(base_c, t_cls(cls_name), cls_ctx)
+            # instance call
+            if callee_ref.kind == cindex.CursorKind.DECL_REF_EXPR:
+                # e.g. d[2] via operator[]: object arrives as first arg
+                if not acs:
+                    self.report(f"mcall:{name}@{cur.location.line}", "no object arg")
+                    return None
+                obj = self.expr(acs[0], t_cls(cls_name), cls_ctx)
+                rest = acs[1:]
+            else:
+                base_c = None
+                for k in callee_ref.get_children():
+                    if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF):
+                        base_c = k
+                        break
+                if base_c is not None:
+                    obj = self.expr(base_c, t_cls(cls_name), cls_ctx)
+                else:
+                    obj = {"k": "this", "cls": cls_name}   # implicit this
+                rest = acs
             if obj is None:
                 return None
             args = []
-            for i, a in enumerate(acs):
-                w = self.param_ty(mparams[i].type, cls_name) if i < len(mparams) else None
+            for i in range(len(mparams)):
+                if i < len(rest):
+                    a = rest[i]
+                else:
+                    defaults = list(mparams[i].get_children())
+                    if not defaults:
+                        break
+                    a = defaults[0]          # materialized default arg
+                w = self.param_ty(mparams[i].type, cls_name)
                 e = self.expr(a, w, cls_ctx)
                 if e is None:
                     return None
@@ -635,19 +789,30 @@ class Frontend:
 
         # friend operator*(float, class) -> member call rewrite (commutative)
         if callee.kind == cindex.CursorKind.FUNCTION_DECL and name == "operator*":
-            acs = self.call_args(cur, callee_ref)
+            acs = self.call_args(cur, callee_ref, callee=callee)
             if len(acs) == 2 and "Vec" not in acs[0].type.spelling:
                 obj = self.expr(acs[1], None, cls_ctx)
                 fp = self.expr(acs[0], t("f32"), cls_ctx)
                 if obj is None or fp is None:
                     return None
                 cls_name = acs[1].type.spelling.split()[0]
+                # match the member overload's IR name (const marker)
+                mname = "op_mul@f32"
+                for mm in self.classes.get(cls_name, {}).get("methods", []):
+                    if mm["name"].startswith("op_mul@f32"):
+                        mname = mm["name"]
+                        break
                 return {"k": "meth", "obj": obj, "cls": cls_name,
-                        "name": "op_mul@f32", "args": [fp], "ret": t_cls(cls_name)}
+                        "name": mname, "args": [fp], "ret": t_cls(cls_name)}
 
         # free function in module (battery helpers, BitsOf, ...)
+        if name == "quiet_NaN":
+            return {"k": "lit", "ty": "f32", "sp": "nan"}
+        if name == "operator*":
+            self.report(f"friendmul@{cur.location.line}", "unhandled friend operator* shape")
+            return None
         args = []
-        for a in self.call_args(cur, callee_ref):
+        for a in self.call_args(cur, callee_ref, callee=callee):
             e = self.expr(a, None, cls_ctx)
             if e is None:
                 return None
@@ -726,6 +891,12 @@ class Frontend:
         for p in md.get_arguments():
             pt = self.param_ty(p.type, cls_ctx)
             sig.append(ty_show(pt) if pt else "?")
+        # const/non-const overloads share the same signature — disambiguate
+        try:
+            if md.is_const_method():
+                sig.append("c")
+        except Exception:
+            pass
         if sig:
             name = f"{name}@{'_'.join(sig)}"
         return name
@@ -734,6 +905,13 @@ class Frontend:
     def stmts(self, cur, cls_ctx, out):
         for k in cur.get_children():
             self.stmt(k, cls_ctx, out)
+
+    def sub_stmts(self, child, cls_ctx, out):
+        """Lower a control-flow body: compound or single statement."""
+        if child.kind == cindex.CursorKind.COMPOUND_STMT:
+            self.stmts(child, cls_ctx, out)
+        else:
+            self.stmt(child, cls_ctx, out)
 
     def stmt(self, cur, cls_ctx, out):
         kind = cur.kind
@@ -750,22 +928,25 @@ class Frontend:
 
         if kind == cindex.CursorKind.IF_STMT:
             kids = list(cur.get_children())
-            comps = [k for k in kids if k.kind == cindex.CursorKind.COMPOUND_STMT]
-            cond = self.expr(kids[0], t("bool"), cls_ctx) if kids else None
-            if cond is None or not comps:
+            # shape: [cond-expr, then-stmt, else-stmt?]
+            if len(kids) < 2:
                 self.report(f"if@{cur.location.line}", "unresolvable if shape")
                 return
+            cond = self.expr(kids[0], t("bool"), cls_ctx)
+            if cond is None:
+                self.poison(f"if@{cur.location.line}", "if condition failed to lower")
+                return
             then, els = [], []
-            self.stmt(comps[0], cls_ctx, then)
-            if len(comps) > 1:
-                self.stmt(comps[1], cls_ctx, els)
+            self.sub_stmts(kids[1], cls_ctx, then)
+            if len(kids) > 2:
+                self.sub_stmts(kids[2], cls_ctx, els)
             out.append({"k": "if", "cond": cond, "then": then, "els": els})
             return
 
         if kind == cindex.CursorKind.FOR_STMT:
+            kids = list(cur.get_children())
             var_name, start, stop = None, None, None
-            body = []
-            for k in cur.get_children():
+            for k in kids:
                 if k.kind == cindex.CursorKind.DECL_STMT and start is None:
                     d = list(k.get_children())[0]
                     var_name = d.spelling
@@ -774,24 +955,26 @@ class Frontend:
                 elif k.kind == cindex.CursorKind.BINARY_OPERATOR and stop is None and start is not None:
                     kids2 = list(k.get_children())
                     stop = self.expr(kids2[-1], t("i32"), cls_ctx)
-            for k in cur.get_children():
-                if k.kind == cindex.CursorKind.COMPOUND_STMT:
-                    self.stmt(k, cls_ctx, body)
+            body_c = kids[-1] if kids else None
+            body = []
+            if body_c is not None and body_c.kind != cindex.CursorKind.DECL_STMT:
+                self.sub_stmts(body_c, cls_ctx, body)
             if var_name is None or start is None or stop is None:
-                self.report(f"for@{cur.location.line}", "non-canonical for loop")
+                self.poison(f"for@{cur.location.line}", "non-canonical for loop")
                 return
             out.append({"k": "for", "var": var_name, "start": start, "stop": stop, "body": body})
             return
 
         if kind == cindex.CursorKind.WHILE_STMT:
             kids = list(cur.get_children())
-            comps = [k for k in kids if k.kind == cindex.CursorKind.COMPOUND_STMT]
-            cond = self.expr(kids[0], t("bool"), cls_ctx) if kids else None
-            if cond is None or not comps:
+            if len(kids) < 2:
                 self.report(f"while@{cur.location.line}", "unresolvable while")
                 return
+            cond = self.expr(kids[0], t("bool"), cls_ctx)
+            if cond is None:
+                return
             body = []
-            self.stmt(comps[0], cls_ctx, body)
+            self.sub_stmts(kids[1], cls_ctx, body)
             out.append({"k": "while", "cond": cond, "body": body})
             return
 
@@ -800,8 +983,16 @@ class Frontend:
             if not kids:
                 out.append({"k": "return", "e": None})
                 return
+            if self.ref_ret:
+                # mutator epilogue `return *this;` -> dropped; a lane read
+                # (op_index) keeps its value
+                e0 = self.strip(kids[0])
+                if e0 is not None and e0.kind in (cindex.CursorKind.CXX_THIS_EXPR,
+                                                 cindex.CursorKind.UNARY_OPERATOR):
+                    return
             e = self.expr(kids[0], None, cls_ctx)
             if e is None:
+                self.poison(f"ret@{cur.location.line}", "return value failed to lower")
                 return
             out.append({"k": "return", "e": e})
             return
@@ -826,6 +1017,7 @@ class Frontend:
                 target = self.assign_target(kids[0], cls_ctx)
                 val = self.expr(kids[1], self.canon(kids[1].type), cls_ctx)
                 if target is None or val is None:
+                    self.poison(f"assign@{cur.location.line}", "assignment failed to lower")
                     return
                 self.expand_assign(target, val, cls_ctx, out)
                 return
@@ -871,6 +1063,13 @@ class Frontend:
         self.report(f"stmt:{kind.name}@{cur.location.line}", "unhandled statement kind")
 
     # ------------------------------------------------------------------ assignment targets
+    def lane_wrap(self, obj, cls_ctx):
+        """Class-typed object -> its SIMD lanes field (mValue)."""
+        ot = self.expr_type(obj)
+        if ot is not None and ot["k"] == "cls" and ot["name"] in ("Vec3", "Vec4", "UVec4"):
+            return {"k": "field", "obj": obj, "name": "mValue"}
+        return obj
+
     def assign_target(self, cur, cls_ctx):
         kind = cur.kind
         if kind == cindex.CursorKind.CALL_EXPR:
@@ -878,11 +1077,23 @@ class Frontend:
             if callee is not None and callee.spelling == "operator[]":
                 acs = self.call_args(cur, ref)
                 if len(acs) >= 2:
-                    obj = self.expr(acs[0], None, cls_ctx)
-                    idx = self.expr(acs[1], None, cls_ctx)
-                    if obj is not None and idx is not None:
+                    if ref.kind == cindex.CursorKind.DECL_REF_EXPR:
+                        obj = self.expr(acs[0], None, cls_ctx)
+                        idx_c = acs[1]
+                    else:
+                        base_c = None
+                        for k in ref.get_children():
+                            if k.kind not in (cindex.CursorKind.MEMBER_REF, cindex.CursorKind.TYPE_REF):
+                                base_c = k
+                                break
+                        idx_c = acs[0] if len(acs) > 0 else None
+                        obj = self.expr(base_c, None, cls_ctx) if base_c is not None \
+                            else {"k": "this", "cls": cls_ctx}
+                    if obj is not None and idx_c is not None:
+                        obj = self.lane_wrap(obj, cls_ctx)
+                        idx = self.expr(idx_c, None, cls_ctx)
                         return {"k": "lane_get", "lanes": obj, "idx": idx,
-                                "ty": self.canon(cur.type), "mut": True}
+                                "ty": {"k": "f32"}, "mut": True}
             self.report(f"target:call@{cur.location.line}", "call not assignable")
             return None
         if kind == cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR:
@@ -891,8 +1102,9 @@ class Frontend:
             idx = self.expr(kids[1], None, cls_ctx)
             if obj is None or idx is None:
                 return None
+            obj = self.lane_wrap(obj, cls_ctx)
             return {"k": "lane_get", "lanes": obj, "idx": idx,
-                    "ty": self.canon(cur.type), "mut": True}
+                    "ty": {"k": "f32"}, "mut": True}
         return self.expr(cur, None, cls_ctx)
 
     def target_read(self, target):
@@ -911,7 +1123,7 @@ class Frontend:
         if target["k"] == "lane_get" and target.get("mut"):
             out.append({"k": "assign",
                         "target": target["lanes"],
-                        "value": {"k": "lane_set", "lanes": self.target_read(target),
+                        "value": {"k": "lane_set", "lanes": target["lanes"],
                                   "idx": target["idx"], "v": value,
                                   "ty": target.get("ty")}})
             return
@@ -937,7 +1149,7 @@ class Frontend:
                         ty = t(TYPE_ALIAS[cls_ctx])
                     break
         if ty is None:
-            self.report(f"var:{name}@{d.location.line}", "unknown variable type")
+            self.poison(f"var:{name}@{d.location.line}", "unknown variable type")
             return
         kids = [c for c in d.get_children() if c.kind != cindex.CursorKind.TYPE_REF]
         if not kids:
@@ -946,6 +1158,7 @@ class Frontend:
             return
         init = self.expr(kids[0], ty, cls_ctx)
         if init is None:
+            self.poison(f"var:{name}@{d.location.line}", "initializer failed to lower")
             return
         if init["k"] == "ctor" and len(init["args"]) == 0:
             out.append({"k": "let", "name": name, "ty": ty, "init": None})
@@ -1060,7 +1273,10 @@ class Frontend:
 
     def lower_method(self, m, cls_name):
         if m.spelling in ("operator=", "operator new", "operator new[]",
-                          "operator delete", "operator delete[]"):
+                          "operator delete", "operator delete[]",
+                          # transcendental: bit-exact cross-language needs a
+                          # libm/Cephes port — capability rung 3
+                          "SinCos", "Tan", "ASin", "ACos", "ATan", "sATan2"):
             return
         try:
             if m.is_defaulted():
@@ -1089,7 +1305,8 @@ class Frontend:
             self.local_types[pname] = pt
 
         ret = self.canon(m.result_type)
-        if ret is None and m.result_type.spelling == "Type" and cls_name in TYPE_ALIAS:
+        if ret is None and (m.result_type.spelling == "Type" or
+                            m.result_type.spelling.endswith("::Type")) and cls_name in TYPE_ALIAS:
             ret = t(TYPE_ALIAS[cls_name])
         if ret is None:
             rt_sp = m.result_type.spelling
@@ -1101,15 +1318,23 @@ class Frontend:
             self.report(f"{cls_name}::{name}", f"unmappable return '{m.result_type.spelling}'")
             return
 
+        # ref-returning methods: operator[] keeps its lane-read return (pointee
+        # type); compound-assignment mutators become void (`return *this` dropped)
+        self.ref_ret = ret["k"] == "ref"
+        if self.ref_ret:
+            ret = ret["to"] if m.spelling == "operator[]" else t("void")
+
         body = []
         comp = None
         for k in m.get_children():
             if k.kind == cindex.CursorKind.COMPOUND_STMT:
                 comp = k
+        self.poisoned = False
         self.stmt(comp, cls_name, body)
+        if self.poisoned:
+            self.report(f"{cls_name}::{name}", "poisoned body — refused")
+            return
 
-        if ret["k"] == "ref":
-            ret = t("void")     # compound ops become void mutators
         self.classes[cls_name]["methods"].append({
             "cls": cls_name, "name": name, "static": is_static,
             "params": params, "ret": ret, "body": body,
@@ -1140,23 +1365,28 @@ class Frontend:
         if comp is None:
             self.report(f"{cls_name}::<ctor>", "no body")
             return
+        self.poisoned = False
         self.stmt(comp, cls_name, body)
+        if self.poisoned:
+            self.report(f"{cls_name}::<ctor>@{c.location.line}", "poisoned body — refused")
+            return
 
-        # member initializers (mValue(...)) prepended
-        for k in c.get_children():
-            if k.kind == cindex.CursorKind.COMPOUND_STMT:
-                continue
-            kids = list(k.get_children())
-            if kids and kids[0].kind == cindex.CursorKind.MEMBER_REF and len(kids) > 1:
-                fname = kids[0].spelling
-                if fname == "mValue":
-                    e = self.expr(kids[1], None, cls_name)
-                    if e is not None:
-                        body.insert(0, {"k": "assign",
-                                        "target": {"k": "field",
-                                                   "obj": {"k": "this", "cls": cls_name},
-                                                   "name": fname},
-                                        "value": e})
+        # member initializers (mValue(...)) prepended — shape: MEMBER_REF + init-expr
+        children = list(c.get_children())
+        for i, k in enumerate(children):
+            if k.kind == cindex.CursorKind.MEMBER_REF and i + 1 < len(children):
+                nxt = children[i + 1]
+                if nxt.kind in (cindex.CursorKind.UNEXPOSED_EXPR, cindex.CursorKind.CALL_EXPR,
+                                cindex.CursorKind.DECL_REF_EXPR, cindex.CursorKind.MEMBER_REF_EXPR):
+                    fname = k.spelling
+                    if fname == "mValue":
+                        e = self.expr(nxt, None, cls_name)
+                        if e is not None:
+                            body.insert(0, {"k": "assign",
+                                            "target": {"k": "field",
+                                                       "obj": {"k": "this", "cls": cls_name},
+                                                       "name": fname},
+                                            "value": e})
         sig = "_".join(ty_show(p["ty"]).replace("const ", "").replace("mut ", "") for p in params) or "default"
         name = f"ctor@{sig}"
         self.classes[cls_name]["methods"].append({
@@ -1170,7 +1400,7 @@ class Frontend:
         params = []
         self.local_types = {}
         for p in c.get_arguments():
-            pt = self.canon(p.type)
+            pt = self.param_ty(p.type, None)
             if pt is None:
                 if "char" in p.type.spelling:
                     pt = t("cstr")
@@ -1195,7 +1425,11 @@ class Frontend:
                 comp = k
         if comp is None:
             return
+        self.poisoned = False
         self.stmt(comp, None, body)
+        if self.poisoned:
+            self.report(f"fun:{name}", "poisoned body — refused")
+            return
         self.funs.append({"name": name, "params": params, "ret": ret, "body": body})
 
     # ------------------------------------------------------------------ pruning
