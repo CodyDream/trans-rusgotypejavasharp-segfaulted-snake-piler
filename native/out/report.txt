@@ -14,7 +14,7 @@ ret@35: return value failed to lower
 Float3::op_ne@Float3_c: poisoned body — refused
 binop@135: unknown binary operator
 assign@135: assignment failed to lower
-Vec3::SetZ@f32: poisoned body — refused
+Vec3::SetZ@f32: poisoned — canonical lane-setter emitted
 assignexpr@138: assignment nested in expression
 stmt:UNEXPOSED_EXPR@138: unhandled statement kind
 refcast@94: pointer cast between lane types
@@ -119,4 +119,3 @@ stmt:SWITCH_STMT@1439: unhandled statement kind
 stmt:UNEXPOSED_EXPR@136: unhandled statement kind
 stmt:UNEXPOSED_EXPR@137: unhandled statement kind
 ('Vec3', 'sUnitSpherical@f32_f32'): calls dropped method Vec4::SinCos@Vec4_Vec4_c
-('Vec3', 'sDecompressUnitVector@u32'): calls dropped method Vec3::SetZ@f32

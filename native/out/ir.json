@@ -7914,6 +7914,66 @@
     },
     {
      "cls": "Vec3",
+     "name": "SetZ@f32",
+     "static": false,
+     "params": [
+      {
+       "name": "self",
+       "ty": {
+        "k": "cls",
+        "name": "Vec3"
+       }
+      },
+      {
+       "name": "inZ",
+       "ty": {
+        "k": "f32"
+       }
+      }
+     ],
+     "ret": {
+      "k": "void"
+     },
+     "body": [
+      {
+       "k": "assign",
+       "target": {
+        "k": "field",
+        "obj": {
+         "k": "this",
+         "cls": "Vec3"
+        },
+        "name": "mValue"
+       },
+       "value": {
+        "k": "lane_set",
+        "lanes": {
+         "k": "field",
+         "obj": {
+          "k": "this",
+          "cls": "Vec3"
+         },
+         "name": "mValue"
+        },
+        "idx": {
+         "k": "lit",
+         "ty": "i32",
+         "sp": "2"
+        },
+        "v": {
+         "k": "var",
+         "name": "inZ"
+        },
+        "ty": {
+         "k": "f32"
+        }
+       }
+      }
+     ],
+     "origin": "Vec3::SetZ"
+    },
+    {
+     "cls": "Vec3",
      "name": "Set@f32_f32_f32",
      "static": false,
      "params": [
@@ -13282,6 +13342,457 @@
       }
      ],
      "origin": "Vec3::CompressUnitVector"
+    },
+    {
+     "cls": "Vec3",
+     "name": "sDecompressUnitVector@u32",
+     "static": true,
+     "params": [
+      {
+       "name": "inValue",
+       "ty": {
+        "k": "u32"
+       }
+      }
+     ],
+     "ret": {
+      "k": "cls",
+      "name": "Vec3"
+     },
+     "body": [
+      {
+       "k": "let",
+       "name": "cOneOverSqrt2",
+       "ty": {
+        "k": "f32"
+       },
+       "init": {
+        "k": "lit",
+        "ty": "f32",
+        "sp": "0.70710678f"
+       }
+      },
+      {
+       "k": "let",
+       "name": "cNumBits",
+       "ty": {
+        "k": "u32"
+       },
+       "init": {
+        "k": "lit",
+        "ty": "u32",
+        "sp": "14"
+       }
+      },
+      {
+       "k": "let",
+       "name": "cMask",
+       "ty": {
+        "k": "u32"
+       },
+       "init": {
+        "k": "bin",
+        "op": "-",
+        "l": {
+         "k": "bin",
+         "op": "<<",
+         "l": {
+          "k": "lit",
+          "ty": "u32",
+          "sp": "1u"
+         },
+         "r": {
+          "k": "var",
+          "name": "cNumBits"
+         },
+         "ty": {
+          "k": "u32"
+         }
+        },
+        "r": {
+         "k": "lit",
+         "ty": "u32",
+         "sp": "1"
+        },
+        "ty": {
+         "k": "u32"
+        }
+       }
+      },
+      {
+       "k": "let",
+       "name": "cMaxValue",
+       "ty": {
+        "k": "u32"
+       },
+       "init": {
+        "k": "bin",
+        "op": "-",
+        "l": {
+         "k": "var",
+         "name": "cMask"
+        },
+        "r": {
+         "k": "lit",
+         "ty": "u32",
+         "sp": "1"
+        },
+        "ty": {
+         "k": "u32"
+        }
+       }
+      },
+      {
+       "k": "let",
+       "name": "cHalfMaxValue",
+       "ty": {
+        "k": "i32"
+       },
+       "init": {
+        "k": "cast",
+        "e": {
+         "k": "bin",
+         "op": ">>",
+         "l": {
+          "k": "var",
+          "name": "cMaxValue"
+         },
+         "r": {
+          "k": "lit",
+          "ty": "i32",
+          "sp": "1"
+         },
+         "ty": {
+          "k": "u32"
+         }
+        },
+        "to": {
+         "k": "i32"
+        }
+       }
+      },
+      {
+       "k": "let",
+       "name": "cScale",
+       "ty": {
+        "k": "f32"
+       },
+       "init": {
+        "k": "bin",
+        "op": "*",
+        "l": {
+         "k": "bin",
+         "op": "*",
+         "l": {
+          "k": "lit",
+          "ty": "f32",
+          "sp": "2.0f"
+         },
+         "r": {
+          "k": "var",
+          "name": "cOneOverSqrt2"
+         },
+         "ty": {
+          "k": "f32"
+         }
+        },
+        "r": {
+         "k": "cast",
+         "e": {
+          "k": "var",
+          "name": "cMaxValue"
+         },
+         "to": {
+          "k": "f32"
+         }
+        },
+        "ty": {
+         "k": "f32"
+        }
+       }
+      },
+      {
+       "k": "let",
+       "name": "v",
+       "ty": {
+        "k": "cls",
+        "name": "Vec3"
+       },
+       "init": {
+        "k": "meth",
+        "obj": {
+         "k": "ctor",
+         "cls": "Vec3",
+         "args": [
+          {
+           "k": "cast",
+           "e": {
+            "k": "bin",
+            "op": "-",
+            "l": {
+             "k": "cast",
+             "e": {
+              "k": "bin",
+              "op": "&",
+              "l": {
+               "k": "var",
+               "name": "inValue"
+              },
+              "r": {
+               "k": "var",
+               "name": "cMask"
+              },
+              "ty": {
+               "k": "u32"
+              }
+             },
+             "to": {
+              "k": "i32"
+             }
+            },
+            "r": {
+             "k": "var",
+             "name": "cHalfMaxValue"
+            },
+            "ty": {
+             "k": "i32"
+            }
+           },
+           "to": {
+            "k": "f32"
+           }
+          },
+          {
+           "k": "cast",
+           "e": {
+            "k": "bin",
+            "op": "-",
+            "l": {
+             "k": "cast",
+             "e": {
+              "k": "bin",
+              "op": "&",
+              "l": {
+               "k": "bin",
+               "op": ">>",
+               "l": {
+                "k": "var",
+                "name": "inValue"
+               },
+               "r": {
+                "k": "var",
+                "name": "cNumBits"
+               },
+               "ty": {
+                "k": "u32"
+               }
+              },
+              "r": {
+               "k": "var",
+               "name": "cMask"
+              },
+              "ty": {
+               "k": "u32"
+              }
+             },
+             "to": {
+              "k": "i32"
+             }
+            },
+            "r": {
+             "k": "var",
+             "name": "cHalfMaxValue"
+            },
+            "ty": {
+             "k": "i32"
+            }
+           },
+           "to": {
+            "k": "f32"
+           }
+          },
+          {
+           "k": "lit",
+           "ty": "f32",
+           "sp": "0.0"
+          }
+         ],
+         "nargs": 3
+        },
+        "cls": "Vec3",
+        "name": "op_mul@f32_c",
+        "args": [
+         {
+          "k": "var",
+          "name": "cScale"
+         }
+        ],
+        "ret": {
+         "k": "cls",
+         "name": "Vec3"
+        }
+       }
+      },
+      {
+       "k": "expr",
+       "e": {
+        "k": "cast",
+        "e": {
+         "k": "lit",
+         "ty": "i32",
+         "sp": "JPH_ASSERT(v.GetZ() == 0.0f)"
+        },
+        "to": {
+         "k": "void"
+        }
+       }
+      },
+      {
+       "k": "expr",
+       "e": {
+        "k": "meth",
+        "obj": {
+         "k": "var",
+         "name": "v"
+        },
+        "cls": "Vec3",
+        "name": "SetZ@f32",
+        "args": [
+         {
+          "k": "intrinsic",
+          "name": "sqrt",
+          "args": [
+           {
+            "k": "sel",
+            "cond": {
+             "k": "bin",
+             "op": ">",
+             "l": {
+              "k": "bin",
+              "op": "-",
+              "l": {
+               "k": "lit",
+               "ty": "f32",
+               "sp": "1.0f"
+              },
+              "r": {
+               "k": "meth",
+               "obj": {
+                "k": "var",
+                "name": "v"
+               },
+               "cls": "Vec3",
+               "name": "LengthSq@c",
+               "args": [],
+               "ret": {
+                "k": "f32"
+               }
+              },
+              "ty": {
+               "k": "f32"
+              }
+             },
+             "r": {
+              "k": "lit",
+              "ty": "f32",
+              "sp": "0.0f"
+             },
+             "ty": {
+              "k": "bool"
+             }
+            },
+            "then": {
+             "k": "lit",
+             "ty": "f32",
+             "sp": "0.0f"
+            },
+            "els": {
+             "k": "bin",
+             "op": "-",
+             "l": {
+              "k": "lit",
+              "ty": "f32",
+              "sp": "1.0f"
+             },
+             "r": {
+              "k": "meth",
+              "obj": {
+               "k": "var",
+               "name": "v"
+              },
+              "cls": "Vec3",
+              "name": "LengthSq@c",
+              "args": [],
+              "ret": {
+               "k": "f32"
+              }
+             },
+             "ty": {
+              "k": "f32"
+             }
+            },
+            "ty": null
+           }
+          ],
+          "ty": {
+           "k": "f32"
+          }
+         }
+        ],
+        "ret": {
+         "k": "void"
+        }
+       }
+      },
+      {
+       "k": "if",
+       "cond": {
+        "k": "bin",
+        "op": "!=",
+        "l": {
+         "k": "bin",
+         "op": "&",
+         "l": {
+          "k": "var",
+          "name": "inValue"
+         },
+         "r": {
+          "k": "lit",
+          "ty": "u32",
+          "sp": "0x80000000u"
+         },
+         "ty": {
+          "k": "u32"
+         }
+        },
+        "r": {
+         "k": "lit",
+         "ty": "u32",
+         "sp": "0"
+        },
+        "ty": {
+         "k": "bool"
+        }
+       },
+       "then": [],
+       "els": []
+      },
+      {
+       "k": "return",
+       "e": {
+        "k": "ctor",
+        "cls": "Vec3",
+        "args": [
+         {
+          "k": "var",
+          "name": "v"
+         }
+        ],
+        "nargs": 1
+       }
+      }
+     ],
+     "origin": "Vec3::sDecompressUnitVector"
     }
    ]
   },

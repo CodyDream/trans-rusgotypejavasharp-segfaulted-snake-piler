@@ -514,6 +514,10 @@ impl Vec3 {
         self.mValue = lane_set_f(self.mValue, (1i32) as usize, inY);
     }
 
+    pub unsafe fn SetZ_f32(&mut self, mut inZ: f32) {
+        self.mValue = lane_set_f(self.mValue, (2i32) as usize, inZ);
+    }
+
     pub unsafe fn Set_f32_f32_f32(self, mut inX: f32, mut inY: f32, mut inZ: f32) {
     }
 
@@ -823,6 +827,21 @@ impl Vec3 {
         value = (value | compressed.GetX_c());
         value = (value | (compressed.GetY_c() << cNumBits));
         return value;
+    }
+
+    pub unsafe fn sDecompressUnitVector_u32(mut inValue: u32) -> Vec3 {
+        let mut cOneOverSqrt2: f32 = (0.70710678f32);
+        let mut cNumBits: u32 = (14u32);
+        let mut cMask: u32 = (((1u32 << cNumBits) - 1u32));
+        let mut cMaxValue: u32 = ((cMask - 1u32));
+        let mut cHalfMaxValue: i32 = (((cMaxValue >> (1i32 as u32)) as i32)) as i32;
+        let mut cScale: f32 = (((2.0f32 * cOneOverSqrt2) * (cMaxValue as f32)));
+        let mut v: Vec3 = (Vec3::ctor_f32_f32_f32((((((inValue & cMask) as i32) as i32) - cHalfMaxValue) as f32), ((((((inValue >> cNumBits) & cMask) as i32) as i32) - cHalfMaxValue) as f32), 0.0f32).op_mul_f32_c(cScale));
+        ();
+        v.SetZ_f32((if ((1.0f32 - v.LengthSq_c()) > 0.0f32) { 0.0f32 } else { (1.0f32 - v.LengthSq_c()) }).sqrt());
+        if ((inValue & 0x80000000u32) != 0u32) {
+        }
+        return v;
     }
 
 }

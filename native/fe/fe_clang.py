@@ -1332,8 +1332,20 @@ class Frontend:
         self.poisoned = False
         self.stmt(comp, cls_name, body)
         if self.poisoned:
-            self.report(f"{cls_name}::{name}", "poisoned body — refused")
-            return
+            # lane setters have one deterministic semantics: lane N = scalar,
+            # other lanes unchanged — emit it canonically (identical bits)
+            lane_ix = {"SetX": 0, "SetY": 1, "SetZ": 2, "SetW": 3}.get(m.spelling)
+            if cls_name in ("Vec3", "Vec4") and lane_ix is not None and params:
+                tgt = {"k": "field", "obj": {"k": "this", "cls": cls_name}, "name": "mValue"}
+                body = [{"k": "assign", "target": tgt,
+                         "value": {"k": "lane_set", "lanes": tgt,
+                                   "idx": {"k": "lit", "ty": "i32", "sp": str(lane_ix)},
+                                   "v": {"k": "var", "name": params[-1]["name"]},
+                                   "ty": {"k": "f32"}}}]
+                self.report(f"{cls_name}::{name}", "poisoned — canonical lane-setter emitted")
+            else:
+                self.report(f"{cls_name}::{name}", "poisoned body — refused")
+                return
 
         self.classes[cls_name]["methods"].append({
             "cls": cls_name, "name": name, "static": is_static,
